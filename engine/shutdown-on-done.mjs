@@ -37,6 +37,11 @@ const SHUTDOWN_EXE = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', '
 // A forgotten machine-wide switch must not power off some unrelated session days
 // later. Ignore (and clear) MACHINE-ARMED once it is older than this.
 const MACHINE_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
+// Same ceiling for a per-session arm: a flag older than this has outlived the sitting the user
+// armed it for, so it is cleared rather than fired. Bounds the "armed for next turn, replied a
+// day later" surprise. Only ever makes the feature MORE conservative - it can prevent an
+// unwanted power-off, never cause one.
+const FLAG_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 const LOG_FILE = join(FLAG_DIR, 'shutdown-on-done.log');
 const logLine = (msg) => {
   try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch {}
@@ -188,7 +193,12 @@ if (mode === 'toggle') {
       process.exit(0);
     }
     mkdirSync(FLAG_DIR, { recursive: true });
-    writeFlagAtomic(flagPath(id), JSON.stringify({ skip: thisTurn ? 0 : 1 }));
+    // armedAt bounds how long an arm may linger before firing. A "next turn" arm (skip:1) that
+    // is not consumed until the user next replies could otherwise fire a DAY later, powering the
+    // PC off in a session the user thinks is live. Stamped from the JSON, not the file mtime:
+    // the skip decrement rewrites the flag (and a backup/AV touch bumps mtime), so mtime would
+    // reset to "now" on the exact path this guard exists to catch. See FLAG_MAX_AGE_MS.
+    writeFlagAtomic(flagPath(id), JSON.stringify({ skip: thisTurn ? 0 : 1, armedAt: Date.now() }));
     console.log(
       thisTurn
         ? `Armed: the PC will shut down (${GRACE_SECONDS}s grace) when THIS response finishes. Disarm: toggle off. Abort a started countdown: shutdown -a`
@@ -289,6 +299,14 @@ const skip =
   typeof parsed.skip === 'number' && Number.isInteger(parsed.skip) && parsed.skip >= 0
     ? parsed.skip
     : null;
+// Age of the arm, for the staleness gate and to carry through the skip decrement. A flag with
+// no usable armedAt reads as infinitely old, so it fails the gate CLOSED (refuse + clear): an
+// un-ageable power-off is exactly the surprise the gate exists to stop, and after the atomic
+// hook swap every real arm carries the stamp.
+const armedAt =
+  parsed && typeof parsed.armedAt === 'number' && Number.isFinite(parsed.armedAt)
+    ? parsed.armedAt
+    : 0;
 
 if (skip === null) {
   // Consume the bad flag so it cannot repeat, and tell the user plainly - silently
@@ -315,8 +333,30 @@ if (skip === null) {
 // through and fires - which is what makes the physical switch work at all.
 if (sameTurn && parsed.consumedInTurn === true) process.exit(0);
 
+// Staleness gate. An arm that has sat longer than the ceiling has outlived the sitting the user
+// armed it for - the classic case being a skip:1 "next turn" arm that is not consumed until the
+// user replies a day later, which would otherwise power the PC off in a session they believe is
+// live. Placed BEFORE the skip branch so a stale skip:1 flag is cleared, not decremented and
+// then fired next turn. Self-clears both markers and tells the user; a missing armedAt reads as
+// age = now, so it fails closed here too.
+if (Date.now() - armedAt > FLAG_MAX_AGE_MS) {
+  try {
+    rmSync(flagPath(id), { force: true });
+    rmSync(requestPath(id), { force: true });
+  } catch {}
+  logLine(`flag stale for session ${id} (armed ${armedAt ? new Date(armedAt).toISOString() : 'unknown'}); disarmed WITHOUT shutting down`);
+  emit({
+    systemMessage:
+      'Shutdown-on-done: the arm was more than 12h old, so the PC was NOT shut down and this chat is now disarmed. Re-arm if you still want it.',
+  });
+  process.exit(0);
+}
+
 if (skip > 0) {
-  writeFlagAtomic(flagPath(id), JSON.stringify({ skip: skip - 1, consumedInTurn: true }));
+  // Preserve armedAt across the decrement: the age is measured from the ORIGINAL arm, so a
+  // skip:1 flag that sits untouched for a day is caught by the staleness gate below on the turn
+  // it would otherwise fire, instead of being refreshed to "now" here.
+  writeFlagAtomic(flagPath(id), JSON.stringify({ skip: skip - 1, consumedInTurn: true, armedAt }));
   emit({
     systemMessage:
       'Shutdown-on-done armed: the PC will shut down when the next response in this chat finishes.',

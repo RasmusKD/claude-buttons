@@ -18,6 +18,13 @@ before(() => { HOME = mkdtempSync(join(tmpdir(), 'cb-engine-')); });
 after(() => { try { rmSync(HOME, { recursive: true, force: true }); } catch {} });
 beforeEach(() => { rmSync(flagDir(), { recursive: true, force: true }); mkdirSync(flagDir(), { recursive: true }); });
 
+// A freshly-armed flag as the engine now writes it: skip + an armedAt stamp. The staleness
+// gate reads armedAt, and a flag missing it is treated as infinitely old (fails closed), so a
+// test simulating a live arm must carry a current stamp - a bare { skip } no longer fires.
+const fresh = (skip) => JSON.stringify({ skip, armedAt: Date.now() });
+// An arm stamped as if it were written N hours ago, for the staleness gate.
+const agedHours = (skip, hours) => JSON.stringify({ skip, armedAt: Date.now() - hours * 3600 * 1000 });
+
 // run in toggle mode (args) with a session id
 function toggle(args, session = 't') {
   const r = spawnSync('node', [ENGINE, ...args.split(' ')],
@@ -126,7 +133,7 @@ test('toggle off is per-chat: cancelling one chat leaves other armed chats intac
 });
 
 test('Stop hook: skip counter decrements without firing', () => {
-  writeFileSync(join(flagDir(), 'sSkip.json'), JSON.stringify({ skip: 1 }));
+  writeFileSync(join(flagDir(), 'sSkip.json'), fresh(1));
   const { out } = stop({ session_id: 'sSkip' });
   assert.match(out, /Shutdown-on-done armed:/, "must say ARMED - /armed/i also matches \"disarmed\"");
   assert.doesNotMatch(out, /shutting down|would start/i);
@@ -134,7 +141,7 @@ test('Stop hook: skip counter decrements without firing', () => {
 });
 
 test('Stop hook: armed (skip 0) fires and consumes the flag (dry-run)', () => {
-  writeFileSync(join(flagDir(), 'sFire.json'), JSON.stringify({ skip: 0 }));
+  writeFileSync(join(flagDir(), 'sFire.json'), fresh(0));
   writeFileSync(join(flagDir(), 'sFire.request'), 'x');
   const { out } = stop({ session_id: 'sFire' });
   assert.match(out, /\[dry-run\].*shutdown/i);
@@ -147,8 +154,47 @@ test('Stop hook: no flag and no machine switch does nothing', () => {
   assert.equal(out, '');
 });
 
+// Staleness gate: an arm older than 12h has outlived the sitting it was armed for. The classic
+// trigger is a skip:1 "next turn" arm that is not consumed until the user replies a day later,
+// which would otherwise power the PC off in a session they believe is live.
+test('Stop hook: a fired-ready arm older than 12h is cleared, NOT fired', () => {
+  writeFileSync(join(flagDir(), 'sStale.json'), agedHours(0, 13));
+  writeFileSync(join(flagDir(), 'sStale.request'), 'x');
+  const { out } = stop({ session_id: 'sStale' });
+  assert.doesNotMatch(out, /would start PC shutdown|\[dry-run\]/i, 'a stale arm must not fire');
+  assert.match(out, /more than 12h old|NOT shut down/i, 'must tell the user it disarmed');
+  assert.ok(!existsSync(join(flagDir(), 'sStale.json')), 'the stale flag is consumed so it cannot repeat');
+  assert.ok(!existsSync(join(flagDir(), 'sStale.request')), 'the standing request is cleared too');
+});
+
+test('Stop hook: a stale skip:1 arm is cleared BEFORE it can decrement toward firing', () => {
+  // Placed before the skip branch on purpose: a stale next-turn arm must be dropped, not
+  // decremented to skip:0 and then fired on the following turn.
+  writeFileSync(join(flagDir(), 'sStaleNext.json'), agedHours(1, 13));
+  const { out } = stop({ session_id: 'sStaleNext' });
+  assert.match(out, /more than 12h old|NOT shut down/i);
+  assert.ok(!existsSync(join(flagDir(), 'sStaleNext.json')), 'cleared, not decremented');
+});
+
+test('Stop hook: an arm just under 12h still fires normally', () => {
+  writeFileSync(join(flagDir(), 'sFresh.json'), agedHours(0, 11));
+  writeFileSync(join(flagDir(), 'sFresh.request'), 'x');
+  const { out } = stop({ session_id: 'sFresh' });
+  assert.match(out, /\[dry-run\].*shutdown/i, 'a still-fresh arm must fire');
+});
+
+test('Stop hook: a flag with no armedAt fails CLOSED (does not fire)', () => {
+  // An un-ageable power-off is exactly the surprise the gate exists to stop, and after the
+  // hook swap every real arm carries a stamp - so a stampless flag is treated as infinitely old.
+  writeFileSync(join(flagDir(), 'sNoStamp.json'), JSON.stringify({ skip: 0 }));
+  writeFileSync(join(flagDir(), 'sNoStamp.request'), 'x');
+  const { out } = stop({ session_id: 'sNoStamp' });
+  assert.doesNotMatch(out, /would start PC shutdown|\[dry-run\]/i, 'no stamp must not fire');
+  assert.ok(!existsSync(join(flagDir(), 'sNoStamp.json')), 'and it is cleared');
+});
+
 test('Stop hook: a leading UTF-8 BOM on the payload still parses (F8 fix)', () => {
-  writeFileSync(join(flagDir(), 'sBom.json'), JSON.stringify({ skip: 0 }));
+  writeFileSync(join(flagDir(), 'sBom.json'), fresh(0));
   const { out } = stop(null, { rawInput: '﻿' + JSON.stringify({ session_id: 'sBom' }) });
   assert.match(out, /\[dry-run\].*shutdown/i);
 });
@@ -216,7 +262,7 @@ for (const [name, body] of [
 // instead of turns decremented twice and fired one response early.
 test('a re-entered Stop hook does not burn the grace turn', () => {
   const id = 'sReenter';
-  writeFileSync(join(flagDir(), `${id}.json`), JSON.stringify({ skip: 1 }));
+  writeFileSync(join(flagDir(), `${id}.json`), fresh(1));
   const first = stop({ session_id: id });
   assert.match(first.out, /Shutdown-on-done armed:/, "must say ARMED - /armed/i also matches \"disarmed\"");
   const second = stop({ session_id: id, stop_hook_active: true });
