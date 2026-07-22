@@ -286,6 +286,22 @@ Check 'the skill does not pre-authorise request-on either (SEC-01)' ($allowLine 
 Check 'the skill body still instructs the agent to run request-on (it just prompts)' `
     ((($skillLines -join "`n") -match 'toggle request-on'))
 
+# A fired shutdown fulfils the request; it does not stand forever. Without this, a chat resumed
+# the morning after a shutdown re-armed itself the moment the user typed - because the old
+# "re-arm if the session continues" instruction did not distinguish "arm never fired" from
+# "already powered off, user came back to work". The guard is prose (it is a judgment the skill
+# must make), so the test pins that the guard EXISTS and that the re-arm bullet is now
+# conditional rather than unconditional.
+$skillBody = ($skillLines -join "`n")
+Check 'the skill says a fired request is fulfilled, not standing' `
+    ($skillBody -match 'fulfilled by a single power-off')
+Check 'the skill forbids re-arming after a fire' `
+    ($skillBody -match 'do not.*re-arm|do not arm again')
+Check 'the re-arm bullet is conditional on the shutdown NOT having fired' `
+    ($skillBody -match 'did NOT fire')
+Check 'the old unconditional re-arm instruction is gone' `
+    ($skillBody -notmatch 'continues past the arming for any reason')
+
 Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
