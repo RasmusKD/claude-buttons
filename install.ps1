@@ -423,10 +423,14 @@ if ($wantShutdown) {
             if (-not (@($cfg.buttons) | Where-Object { $_.text -eq '/shutdown-on-done group-on' })) {
                 $newBtns += [pscustomobject]@{
                     label = 'Group shutdown'; short = 'Group'; icon = 'grid'
-                    desc = 'Shuts the PC down once ALL grouped chats are done - the LAST one to finish triggers it (agent-judged, 60 s grace). Click in each chat you want to wait for. Lit while a group shutdown is active; click again to leave the group.'
+                    desc = 'Shuts the PC down once ALL grouped chats are done - the LAST one to finish triggers it (agent-judged, 60 s grace). Click it in each chat you want to wait for. Lit while a group shutdown is active anywhere. To cancel, use the single Shutdown off (it clears the whole group).'
                     toggle = $true
+                    # One-way: the lit state is a shared indicator (it watches the whole group/
+                    # dir), so every click JOINS this chat. Without this, the second pane's click
+                    # would read the button as already-lit and send group-off instead of joining.
+                    oneWay = $true
                     stateGlob = '%USERPROFILE%\.claude\shutdown-on-done\group\*.member'
-                    text = '/shutdown-on-done group-on'; textOff = '/shutdown-on-done group-off'; submit = $true }
+                    text = '/shutdown-on-done group-on'; submit = $true }
             }
             if ($newBtns.Count) {
                 $cfg.buttons = @($cfg.buttons) + $newBtns

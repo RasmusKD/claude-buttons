@@ -3320,6 +3320,23 @@ function Set-ToggleFace($item, [bool]$on) {
     }
 }
 
+# What a click on this button should send, given its current lit state. Pure and side-effect
+# free so the click path and the tests share one source of truth (Rule 16).
+#   - non-toggle:      always the base text.
+#   - one-way toggle:  always the base text (join action); NewOn=true is display only. Used by
+#                      the group-shutdown button, whose lit state is a shared indicator that
+#                      matches in every pane once ANY chat joins - so a normal toggle would send
+#                      textOff on the 2nd..Nth pane and only the first would ever join.
+#   - normal toggle:   textOn/text when turning on, textOff when turning off.
+function Resolve-ToggleSend($item, [bool]$curState) {
+    if (-not $item.toggle) { return @{ Text = [string]$item.text; NewOn = $null } }
+    if ($item.oneWay) { return @{ Text = [string]$item.text; NewOn = $true } }
+    $newOn = -not $curState
+    $text = if ($newOn) { if ($item.textOn) { [string]$item.textOn } else { [string]$item.text } }
+            else { [string]$item.textOff }
+    return @{ Text = $text; NewOn = $newOn }
+}
+
 # Put the user's clipboard back. Only ever called once the app has demonstrably consumed our
 # paste, or once enough time has passed that a queued Ctrl+V cannot still be pending.
 # Skips the restore if another app copied something meanwhile, rather than clobbering it.
@@ -3399,13 +3416,9 @@ function Invoke-PillClick($btn) {
         # Work out what this click WOULD send, WITHOUT mutating state yet (H7: the toggle
         # flip must not happen if the send is aborted because Claude isn't foreground).
         $isToggle = [bool]$item.toggle
-        $newOn = $null
-        $textToSend = [string]$item.text
-        if ($isToggle) {
-            $newOn = -not (Get-ToggleState $item)
-            $textToSend = if ($newOn) { if ($item.textOn) { [string]$item.textOn } else { [string]$item.text } }
-                          else { [string]$item.textOff }
-        }
+        $resolved = Resolve-ToggleSend $item (Get-ToggleState $item)
+        $newOn = $resolved.NewOn
+        $textToSend = $resolved.Text
         $script:sending = $true
         try {
             Start-Sleep -Milliseconds 40

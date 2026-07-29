@@ -985,6 +985,33 @@ try {
     Check 'the poll pair still collapses after an eviction burst' (((@(Get-Content $script:logPath)).Count - $before) -eq 2)
 } finally { Remove-Item $logDir -Recurse -Force -ErrorAction SilentlyContinue }
 
+# --- A one-way toggle always sends its join text, regardless of lit state ---
+# The group-shutdown button's lit state is a shared indicator (its stateGlob matches the whole
+# group/ dir), so it reads lit in every pane once one chat joins. A normal toggle would then
+# send textOff on the 2nd..Nth pane's click and only the first pane would ever join. Resolve-
+# ToggleSend is the shared source of truth for what a click sends; drive the real function.
+$rtsNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-ToggleSend' }, $true)
+Check 'Resolve-ToggleSend was found' ($null -ne $rtsNode)
+. ([scriptblock]::Create($rtsNode.Extent.Text))
+
+$oneWayBtn = [pscustomobject]@{ toggle = $true; oneWay = $true; text = '/shutdown-on-done group-on'; textOff = '/shutdown-on-done group-off' }
+$rOff = Resolve-ToggleSend $oneWayBtn $false
+$rOn = Resolve-ToggleSend $oneWayBtn $true
+Check 'one-way toggle sends the join text when UNLIT' ($rOff.Text -eq '/shutdown-on-done group-on')
+Check 'one-way toggle STILL sends the join text when already LIT (never textOff)' ($rOn.Text -eq '/shutdown-on-done group-on')
+Check 'one-way toggle never resolves to its textOff' (($rOff.Text -ne '/shutdown-on-done group-off') -and ($rOn.Text -ne '/shutdown-on-done group-off'))
+
+# A normal toggle must be unchanged: on when unlit, off when lit.
+$normalBtn = [pscustomobject]@{ toggle = $true; text = '/x on'; textOff = '/x off' }
+Check 'a normal toggle sends ON text when unlit' ((Resolve-ToggleSend $normalBtn $false).Text -eq '/x on')
+Check 'a normal toggle sends OFF text when lit' ((Resolve-ToggleSend $normalBtn $true).Text -eq '/x off')
+$onWithTextOn = [pscustomobject]@{ toggle = $true; text = '/x'; textOn = '/x on'; textOff = '/x off' }
+Check 'a normal toggle prefers textOn when provided' ((Resolve-ToggleSend $onWithTextOn $false).Text -eq '/x on')
+
+# A non-toggle button always sends its plain text.
+$plainBtn = [pscustomobject]@{ text = '/compact' }
+Check 'a non-toggle button sends its plain text' ((Resolve-ToggleSend $plainBtn $false).Text -eq '/compact')
+
 Write-Host ""
 if ($fails -eq 0) { Write-Host "Panel tests: $count passed" -ForegroundColor Green; exit 0 }
 else { Write-Host "Panel tests: $fails of $count FAILED" -ForegroundColor Red; exit 1 }
