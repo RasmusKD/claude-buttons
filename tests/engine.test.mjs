@@ -183,6 +183,16 @@ test('Stop hook: an arm just under 12h still fires normally', () => {
   assert.match(out, /\[dry-run\].*shutdown/i, 'a still-fresh arm must fire');
 });
 
+// Grid-watcher fire mode: the panel calls `fire` once every pane has gone idle. It needs no
+// flag, session, or marker - the watcher already made the decision - and just triggers the
+// shared power-off.
+test('fire mode starts the shutdown (dry-run) with no flag or session needed', () => {
+  const r = spawnSync('node', [ENGINE, 'fire'],
+    { env: { ...process.env, USERPROFILE: HOME, HOME, SHUTDOWN_ON_DONE_DRYRUN: '1' }, encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match((r.stdout || '').trim(), /FIRED/);
+});
+
 // Group ("last one out") mode: the PC shuts down only when the LAST armed chat finishes, so a
 // grid of chats each doing background work all complete before anything powers off.
 test('group-on enrols a chat and clears any solo arm (no first-out fire)', () => {

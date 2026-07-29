@@ -416,28 +416,25 @@ if ($wantShutdown) {
                     stateGlob = '%USERPROFILE%\.claude\shutdown-on-done\*.request'
                     text = '/shutdown-on-done on'; textOff = '/shutdown-on-done off'; submit = $true }
             }
-            # Group ("last one out") button: for a grid of chats, shut down only when the LAST
-            # one finishes. Click it in each chat you want to wait for. Lit while ANY group
-            # member exists (a group shutdown is active), mirroring how the single button lights
-            # on any standing request. group-off leaves this chat; the red off cancels the group.
-            if (-not (@($cfg.buttons) | Where-Object { $_.text -eq '/shutdown-on-done group-on' })) {
+            # Grid-watch button: for a grid of chats, ONE click watches every open pane and shuts
+            # the PC down once ALL of them have been idle (no Stop / running-task) for the idle
+            # window. A panel-local action (no chat message, no per-chat arming, no join race);
+            # the panel is the only thing that can see the whole grid. Lit while watching; click
+            # again - or the single Shutdown off - to cancel.
+            if (-not (@($cfg.buttons) | Where-Object { $_.action -eq 'watch-toggle' })) {
                 $newBtns += [pscustomobject]@{
-                    label = 'Group shutdown'; short = 'Group'; icon = 'grid'
-                    desc = 'Shuts the PC down once ALL grouped chats are done - the LAST one to finish triggers it (agent-judged, 60 s grace). Click it in each chat you want to wait for. Lit while a group shutdown is active anywhere. To cancel, use the single Shutdown off (it clears the whole group).'
+                    label = 'Watch and shutdown'; short = 'Watch'; icon = 'clock'
+                    desc = 'ONE click watches ALL open chats and shuts the PC down once every one has been idle for a few minutes (default 5). No per-chat arming. Lit while watching; click again to cancel, or use Shutdown off.'
                     toggle = $true
-                    # One-way: the lit state is a shared indicator (it watches the whole group/
-                    # dir), so every click JOINS this chat. Without this, the second pane's click
-                    # would read the button as already-lit and send group-off instead of joining.
-                    oneWay = $true
-                    stateGlob = '%USERPROFILE%\.claude\shutdown-on-done\group\*.member'
-                    text = '/shutdown-on-done group-on'; submit = $true }
+                    action = 'watch-toggle'
+                    stateGlob = '%USERPROFILE%\.claude\shutdown-on-done\watch' }
             }
             if ($newBtns.Count) {
                 $cfg.buttons = @($cfg.buttons) + $newBtns
                 Write-JsonAtomic $cfgPath ($cfg | ConvertTo-Json -Depth 100)
             }
         } catch {}
-        Write-Host "  + Shutdown-on-done engine installed (completion-judged; power + group buttons added to the panel)." -ForegroundColor DarkGray
+        Write-Host "  + Shutdown-on-done engine installed (completion-judged; power + grid-watch buttons added to the panel)." -ForegroundColor DarkGray
     }
 }
 

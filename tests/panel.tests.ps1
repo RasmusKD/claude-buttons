@@ -1012,6 +1012,68 @@ Check 'a normal toggle prefers textOn when provided' ((Resolve-ToggleSend $onWit
 $plainBtn = [pscustomobject]@{ text = '/compact' }
 Check 'a non-toggle button sends its plain text' ((Resolve-ToggleSend $plainBtn $false).Text -eq '/compact')
 
+# --- Grid watcher: fire only when EVERY pane has been idle past the threshold ---
+# Drive the real Update-GridWatch with a stubbed pane set and a temp marker so the idle/busy
+# state machine is exercised, not re-described. Write-CkLog is stubbed to a no-op for silence.
+function Write-CkLog([string]$m) {}
+$gwNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Update-GridWatch' }, $true)
+Check 'Update-GridWatch was found' ($null -ne $gwNode)
+. ([scriptblock]::Create($gwNode.Extent.Text))
+$gwDir = Join-Path ([IO.Path]::GetTempPath()) ("cb-gw-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $gwDir | Out-Null
+$script:watchMarker = Join-Path $gwDir 'watch'
+$script:watchEngine = Join-Path $gwDir 'no-such-engine.mjs'   # missing on purpose: never really powers off
+$script:watchIdleSeconds = 2
+try {
+    # No marker => not watching => idle timer stays clear.
+    $script:allIdleSince = $null
+    $script:panes = @(@{ Busy = $false })
+    Update-GridWatch
+    Check 'no marker: the idle timer never starts' ($null -eq $script:allIdleSince)
+
+    # Arm the watch. A BUSY pane keeps the timer clear (never counts down while working).
+    Set-Content -Path $script:watchMarker -Value 'x'
+    $script:panes = @(@{ Busy = $true }, @{ Busy = $false })
+    Update-GridWatch
+    Check 'a busy pane keeps the countdown from starting' ($null -eq $script:allIdleSince)
+
+    # All idle: the timer starts but does NOT fire immediately.
+    $script:panes = @(@{ Busy = $false }, @{ Busy = $false })
+    Update-GridWatch
+    Check 'all idle: the countdown starts' ($null -ne $script:allIdleSince)
+    Check 'all idle: it does NOT fire before the threshold' (Test-Path $script:watchMarker)
+
+    # A pane going busy again RESETS the timer (the "it paused between turns" case).
+    $script:panes = @(@{ Busy = $true }, @{ Busy = $false })
+    Update-GridWatch
+    Check 'a pane going busy again resets the countdown' ($null -eq $script:allIdleSince)
+
+    # No panes visible (a modal is open) must HOLD, never fire - "no panes" is not "idle".
+    Set-Content -Path $script:watchMarker -Value 'x'
+    $script:allIdleSince = (Get-Date).AddSeconds(-60)
+    $script:panes = @()
+    Update-GridWatch
+    Check 'no panes visible: the watch holds and does not fire' (Test-Path $script:watchMarker)
+
+    # Threshold reached: drop the marker (one-shot) and attempt the fire.
+    $script:panes = @(@{ Busy = $false })
+    $script:allIdleSince = (Get-Date).AddSeconds(-($script:watchIdleSeconds + 1))
+    Update-GridWatch
+    Check 'threshold reached: the marker is cleared (one-shot fire)' (-not (Test-Path $script:watchMarker))
+    Check 'threshold reached: the idle timer is cleared' ($null -eq $script:allIdleSince)
+
+    # Invoke-PanelAction: watch-toggle arms and cancels the marker.
+    $paNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-PanelAction' }, $true)
+    Check 'Invoke-PanelAction was found' ($null -ne $paNode)
+    function Set-ToggleFace($item, [bool]$on) {}   # UI-only; stub for headless
+    . ([scriptblock]::Create($paNode.Extent.Text))
+    Remove-Item $script:watchMarker -Force -ErrorAction SilentlyContinue
+    Invoke-PanelAction @{ action = 'watch-toggle' }
+    Check 'watch-toggle arms the marker when off' (Test-Path $script:watchMarker)
+    Invoke-PanelAction @{ action = 'watch-toggle' }
+    Check 'watch-toggle clears the marker when on' (-not (Test-Path $script:watchMarker))
+} finally { Remove-Item $gwDir -Recurse -Force -ErrorAction SilentlyContinue }
+
 Write-Host ""
 if ($fails -eq 0) { Write-Host "Panel tests: $count passed" -ForegroundColor Green; exit 0 }
 else { Write-Host "Panel tests: $fails of $count FAILED" -ForegroundColor Red; exit 1 }

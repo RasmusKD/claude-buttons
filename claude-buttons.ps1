@@ -862,6 +862,13 @@ if ($script:config.uiaPaneMatch) { $script:uiaPaneMatch = [string]$script:config
 # rename or localization on Claude's side can be self-healed from buttons.json.
 $script:uiaComposerName = 'Prompt'
 if ($script:config.uiaComposerName) { $script:uiaComposerName = [string]$script:config.uiaComposerName }
+# Grid watcher: how long EVERY pane must sit idle (no Stop / running-task) before the PC powers
+# off. Long enough that a normal gap between an agent's turns never triggers it. Configurable.
+$script:watchIdleSeconds = 300
+if ($script:config.watchIdleSeconds) { $script:watchIdleSeconds = [int]$script:config.watchIdleSeconds }
+$script:allIdleSince = $null   # wall-clock time the last busy pane went quiet; $null while any busy
+$script:watchMarker = Join-Path $env:USERPROFILE '.claude\shutdown-on-done\watch'
+$script:watchEngine = Join-Path $env:USERPROFILE '.claude\hooks\shutdown-on-done.mjs'
 $script:uiaSidebarName = 'Sidebar'      # accessibility name of the sidebar (fallback strategy)
 if ($script:config.uiaSidebarName) { $script:uiaSidebarName = [string]$script:config.uiaSidebarName }
 $script:zoneTop = 45                    # height (logical px) of the top zone holding the chat-title tab
@@ -1854,10 +1861,25 @@ function Update-UiaInfo {
                         $dockY = [int]($cBottom + (SW 20))
                     }
                 }
+                # Is THIS pane generating? Measured signal (not a guess): a busy pane shows a
+                # 'Stop' button where an idle one shows 'Send', and background work shows an
+                # 'N running task' button. Either, sitting in this pane's column and in the band
+                # around its composer, means the chat is still working. The grid-watcher reads
+                # this to decide when EVERY pane has gone quiet.
+                $busy = $false
+                foreach ($b in $allBtns) {
+                    $nm = [string]$b.Cached.Name
+                    if ($nm -eq 'Stop' -or $nm -match '^\d+\s+running task') {
+                        $bb = $b.Cached.BoundingRectangle
+                        $bcx = $bb.X + $bb.Width / 2; $bcy = $bb.Y + $bb.Height / 2
+                        if ($bcx -ge ($c.X - 40) -and $bcx -le ($c.X + $c.W + 40) -and
+                            $bcy -ge ($c.Y - 40) -and $bcy -le ($c.Y + $c.H + 140)) { $busy = $true; break }
+                    }
+                }
                 $newPanes += @{
                     OffL = $c.X - $wr.Left; OffT = $c.Y - $wr.Top; Width = $c.W
                     BottomOff = 0; Title = $null; RowCenter = $null; LeftOff = $null
-                    Cx = $c.X; Cy = $c.Y; Cw = $c.W; Ch = $c.H; Composer = $c.El
+                    Cx = $c.X; Cy = $c.Y; Cw = $c.W; Ch = $c.H; Composer = $c.El; Busy = $busy
                     # Measured row extents; fall back to the composer's own edges.
                     RowL = if ($null -ne $rowL) { [int]$rowL } else { [int]$c.X }
                     RowR = if ($null -ne $rowR) { [int]$rowR } else { [int]($c.X + $c.W) }
@@ -1892,6 +1914,7 @@ function Update-UiaInfo {
         if ($script:dockDiag.Count) { Write-CkLog ("DOCK " + ($script:dockDiag -join ' ')) }
         Set-PaneSideRooms $newPanes $wr
         $script:panes = $newPanes
+        Update-GridWatch
 
         # Primary aliases = first pane (kept for the main strip and pinning)
         if ($newPanes.Count -gt 0) {
@@ -3383,12 +3406,75 @@ function Restore-ClipboardLater($backup, $seqAfterSet, [int]$delayMs = 6000) {
     Write-CkLog "Paste unconfirmed; holding our text on the clipboard for ${delayMs}ms so a late paste cannot deliver the user's clipboard"
 }
 
+# The grid watcher, evaluated once per UIA poll. When armed (its marker exists), it tracks how
+# long EVERY pane has been idle and fires the shared power-off once that passes the threshold.
+# Wall-clock based, so a sparse poll cannot miscount; a single busy pane resets the timer. The
+# panel is the only place that can see the whole grid, so the coordination lives here, not in a
+# per-session hook.
+function Update-GridWatch {
+    if (-not (Test-Path $script:watchMarker)) { $script:allIdleSince = $null; return }
+    # No panes visible (a modal is open, or the app is minimised): cannot judge, so hold. Do NOT
+    # treat "no panes" as idle - that would fire while the user has a dialog open.
+    if (-not $script:panes -or $script:panes.Count -eq 0) { return }
+    $anyBusy = $false
+    foreach ($p in $script:panes) { if ($p.Busy) { $anyBusy = $true; break } }
+    if ($anyBusy) {
+        if ($null -ne $script:allIdleSince) { Write-CkLog 'Grid watch: a pane went busy again; idle timer reset' }
+        $script:allIdleSince = $null
+        return
+    }
+    if ($null -eq $script:allIdleSince) {
+        $script:allIdleSince = Get-Date
+        Write-CkLog ("Grid watch: all {0} panes idle; {1}s countdown to shutdown begins" -f $script:panes.Count, $script:watchIdleSeconds)
+        return
+    }
+    $idleFor = ((Get-Date) - $script:allIdleSince).TotalSeconds
+    if ($idleFor -ge $script:watchIdleSeconds) {
+        Write-CkLog ("Grid watch: all panes idle {0}s >= {1}s; firing shutdown" -f [int]$idleFor, $script:watchIdleSeconds)
+        # One-shot: drop the marker BEFORE firing so a slow launch cannot re-trigger and the
+        # button goes dark immediately.
+        Remove-Item $script:watchMarker -Force -ErrorAction SilentlyContinue
+        $script:allIdleSince = $null
+        if (Test-Path $script:watchEngine) {
+            try { Start-Process -FilePath 'node' -ArgumentList @("`"$script:watchEngine`"", 'fire') -WindowStyle Hidden }
+            catch { Write-CkLog "Grid watch: could not launch fire: $($_.Exception.Message)" }
+        } else {
+            Write-CkLog 'Grid watch: engine not found; cannot fire'
+        }
+    }
+}
+
+# A button that runs a LOCAL panel action instead of sending text to a chat. The grid-watch
+# button is the first: it arms/cancels the watcher (a marker file the stateGlob lights on), with
+# no composer involved, so it cannot be misdirected to the wrong pane and needs no agent.
+function Invoke-PanelAction($item) {
+    switch ([string]$item.action) {
+        'watch-toggle' {
+            if (Test-Path $script:watchMarker) {
+                Remove-Item $script:watchMarker -Force -ErrorAction SilentlyContinue
+                $script:allIdleSince = $null
+                Write-CkLog 'Grid watch: cancelled by user'
+            } else {
+                try { New-Item -ItemType Directory -Force -Path (Split-Path $script:watchMarker -Parent) | Out-Null } catch {}
+                try { Set-Content -Path $script:watchMarker -Value (Get-Date -Format o) -Encoding UTF8 } catch {}
+                $script:allIdleSince = $null
+                Write-CkLog "Grid watch: armed by user (fires after all panes idle ${script:watchIdleSeconds}s)"
+            }
+            Set-ToggleFace $item (Test-Path $script:watchMarker)
+        }
+        default { Write-CkLog "Unknown panel action: $($item.action)" }
+    }
+}
+
 function Invoke-PillClick($btn) {
     if ($script:sending) { return }   # guard against reentrancy while a send is in progress
     # A group button has nothing to send: it opens (or pins open) its flyout instead. Checked
     # before lastClickedBtn is set, so opening a group never re-points an abandoned-send warning
     # at the group instead of the button that actually failed.
     if ($btn.Tag -and $btn.Tag.__isGroup) { Show-GroupFlyout $btn $true; return }
+    # A panel-action button (e.g. the grid watcher) runs a local action and sends nothing to any
+    # chat - so it bypasses the whole focus/paste/submit path below.
+    if ($btn.Tag -and $btn.Tag.action) { $script:lastClickedBtn = $btn; Invoke-PanelAction $btn.Tag; return }
     $script:lastClickedBtn = $btn     # so an abandoned send can warn next to the button clicked
     # Shift-click = insert the text but do NOT press Enter, so it can be edited or extended
     # first. Read it up front: Shift may be released during the focus + paste round-trip.

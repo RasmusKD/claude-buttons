@@ -59,6 +59,29 @@ const machineArmedFresh = () => {
   return true;
 };
 
+// The ONE power-off. Both the Stop-hook fire path (a single chat finished) and the panel's
+// grid-watcher `fire` mode (every pane went idle) call this, so the shutdown command, the grace
+// window, the dry-run seam and the logging live in exactly one place. Returns true if the
+// shutdown was started (or suppressed by dry-run), false if the command itself failed.
+const startShutdown = (why) => {
+  if (process.env.SHUTDOWN_ON_DONE_DRYRUN === '1') {
+    logLine(`[dry-run] would start shutdown (${why})`);
+    return true;
+  }
+  // -f force-closes apps that would otherwise block the shutdown; without it a single hung app
+  // leaves the PC on all night, defeating the feature.
+  const res = spawnSync(
+    SHUTDOWN_EXE,
+    ['-s', '-f', '-t', String(GRACE_SECONDS), '-c',
+      `Claude finished. Shutting down in ${GRACE_SECONDS}s; run "shutdown -a" to abort.`],
+    { stdio: 'pipe' },
+  );
+  if (res.status === 0) { logLine(`SHUTDOWN started (${GRACE_SECONDS}s grace): ${why}`); return true; }
+  const err = (res.stderr ?? '').toString().trim() || (res.error ? String(res.error) : 'unknown error');
+  logLine(`SHUTDOWN failed (${why}): ${err}`);
+  return false;
+};
+
 // Backing store for Atomics.wait, used as a CPU-free synchronous sleep in the retry below.
 const SLEEP_LOCK = new Int32Array(new SharedArrayBuffer(4));
 
@@ -320,6 +343,9 @@ if (mode === 'toggle') {
     rmSync(requestPath(id), { force: true });
     rmSync(MACHINE_FLAG, { force: true });
     try { rmSync(GROUP_DIR, { recursive: true, force: true }); } catch {}
+    // The panel's grid watcher is part of "everything that could power the PC off", so a master
+    // off cancels it too. The panel notices the marker gone on its next poll and stops watching.
+    try { rmSync(join(FLAG_DIR, 'watch'), { force: true }); } catch {}
     const abort = spawnSync(SHUTDOWN_EXE, ['-a'], { stdio: 'pipe' });
     console.log(
       abort.status === 0
@@ -336,6 +362,17 @@ if (mode === 'toggle') {
     console.log(`${chat} ${req} ${grp} ${machine}`);
   }
   process.exit(0);
+}
+
+// Grid-watcher fire mode. The panel calls this once it has observed EVERY chat pane sit idle
+// for its threshold - the panel is the coordinator (it can see the whole grid; a per-session
+// hook cannot), and this is just the shared power-off. Deliberately NOT in permissions.allow:
+// an agent cannot run it unattended, only the panel (a human-driven process) does. No flags or
+// markers are involved - the decision was already made by the watcher.
+if (mode === 'fire') {
+  const ok = startShutdown('grid watcher: all panes idle');
+  process.stdout.write(ok ? 'FIRED' : 'FAILED');
+  process.exit(ok ? 0 : 1);
 }
 
 // Stop-hook mode.
@@ -482,22 +519,13 @@ try {
 }
 
 if (process.env.SHUTDOWN_ON_DONE_DRYRUN === '1') {
+  startShutdown(`session ${id}`);   // logs the dry-run line; does not power off
   emit({ systemMessage: '[dry-run] Chat done; would start PC shutdown now.' });
   process.exit(0);
 }
 
-// -f force-closes apps that would otherwise block the shutdown; without it a
-// single hung app leaves the PC on all night, which defeats the feature.
-const res = spawnSync(
-  SHUTDOWN_EXE,
-  ['-s', '-f', '-t', String(GRACE_SECONDS), '-c', `Claude chat finished. Shutting down in ${GRACE_SECONDS}s; run "shutdown -a" to abort.`],
-  { stdio: 'pipe' },
-);
-if (res.status === 0) {
-  logLine(`SHUTDOWN started (${GRACE_SECONDS}s grace) for session ${id}`);
+if (startShutdown(`session ${id}`)) {
   emit({ systemMessage: `Chat done: PC shutting down in ${GRACE_SECONDS} seconds. Abort with: shutdown -a` });
 } else {
-  const err = (res.stderr ?? '').toString().trim() || (res.error ? String(res.error) : 'unknown error');
-  logLine(`SHUTDOWN failed for session ${id}: ${err}`);
-  emit({ systemMessage: `Shutdown-on-done: failed to start shutdown (${err}).` });
+  emit({ systemMessage: 'Shutdown-on-done: failed to start shutdown (see the shutdown-on-done log).' });
 }
