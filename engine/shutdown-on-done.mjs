@@ -14,7 +14,7 @@
 //
 // Set SHUTDOWN_ON_DONE_DRYRUN=1 to test the Stop path without touching the PC.
 import {
-  readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync, appendFileSync, renameSync,
+  readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync, appendFileSync, renameSync, readdirSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -110,6 +110,37 @@ const flagPath = (id) => join(FLAG_DIR, `${id}.json`);
 // Standing-request marker: exists from the moment the user asks until disarm or
 // fire. Carries no logic; external UIs (button panels) read it for toggle state.
 const requestPath = (id) => join(FLAG_DIR, `${id}.request`);
+
+// ---- Group ("last one out") mode -----------------------------------------------------------
+// Several chats can be running at once (a grid of panes), each with its own background work.
+// The user wants the PC to power off only when the LAST of them finishes, not the first. So a
+// chat JOINS a group (one member file each), drops out when its work is genuinely done, and
+// whoever removes the final member arms the ordinary solo this-turn flag - reusing the whole
+// tested fire path (grace, consume, staleness). A member file is a tiny JSON carrying armedAt.
+const GROUP_DIR = join(FLAG_DIR, 'group');
+const memberPath = (id) => join(GROUP_DIR, `${id}.member`);
+// The group members that still count as live. A member older than the same 12h ceiling is
+// dropped so a forgotten chat cannot keep the PC alive forever - but a stale drop NEVER fires
+// the shutdown (only a chat finishing on its own is "done"; a stuck chat keeps the PC on, which
+// is the safe direction the user chose). Returns the surviving session ids.
+const liveGroupMembers = () => {
+  if (!existsSync(GROUP_DIR)) return [];
+  let names = [];
+  try { names = readdirSync(GROUP_DIR); } catch { return []; }
+  const live = [];
+  for (const f of names) {
+    if (!f.endsWith('.member')) continue;
+    let armedAt = 0;
+    try { armedAt = JSON.parse(readFileSync(join(GROUP_DIR, f), 'utf8')).armedAt; } catch { armedAt = 0; }
+    if (typeof armedAt === 'number' && Number.isFinite(armedAt) && Date.now() - armedAt <= FLAG_MAX_AGE_MS) {
+      live.push(f.slice(0, -'.member'.length));
+    } else {
+      try { rmSync(join(GROUP_DIR, f), { force: true }); } catch {}
+      logLine(`group member ${f} dropped (stale/unstamped); NOT firing`);
+    }
+  }
+  return live;
+};
 const emit = (obj) => process.stdout.write(JSON.stringify(obj));
 
 // Whether the Stop hook is re-entering within the same user-visible turn. ONE normalizer used
@@ -126,7 +157,8 @@ if (mode === 'toggle') {
   // Nothing on the disarm path may fail quietly. A user who types a disarm command and
   // sees a success-shaped message must never still be armed, so EVERY unrecognised token
   // exits non-zero rather than falling through to the status report.
-  const KNOWN = ['on', 'off', 'request-on', 'request-off', 'status'];
+  const KNOWN = ['on', 'off', 'request-on', 'request-off', 'status',
+    'group-on', 'group-done', 'group-off'];
   const KNOWN_FLAGS = ['--this-turn'];
   const flags = rest.filter((a) => a.startsWith('--'));
   const words = rest.filter((a) => !a.startsWith('--'));
@@ -220,26 +252,88 @@ if (mode === 'toggle') {
     // confirmation and the PC still powered off.
     rmSync(MACHINE_FLAG, { force: true });
     console.log('Standing shutdown request cleared for this chat (and any arm it authorised).');
+  } else if (action === 'group-on') {
+    // Enrol this chat in the "last one out" group. group-on is itself the consent step - it is
+    // NOT pre-authorized (see the installer allow-rules), so it prompts exactly like request-on,
+    // which is what stops an injection from enrolling a chat toward a group power-off. No
+    // separate request marker is needed. A chat cannot be in both modes at once, so clear any
+    // solo arm it has: otherwise the solo flag would fire on THIS chat's turn end (first-out),
+    // defeating the whole point of the group (last-out).
+    rmSync(flagPath(id), { force: true });
+    rmSync(requestPath(id), { force: true });
+    mkdirSync(GROUP_DIR, { recursive: true });
+    writeFlagAtomic(memberPath(id), JSON.stringify({ armedAt: Date.now() }));
+    const n = liveGroupMembers().length;
+    console.log(
+      `Joined the group shutdown (${n} chat${n === 1 ? '' : 's'} armed). The PC powers off ` +
+        `${GRACE_SECONDS}s after the LAST armed chat finishes - run \`toggle group-done\` when ` +
+        `THIS chat is completely finished (background work included). Leave without shutting ` +
+        `down: toggle group-off. Cancel the whole group + abort a countdown: toggle off.`,
+    );
+  } else if (action === 'group-done') {
+    // This chat's work is genuinely finished (the agent judges completion, exactly as with a
+    // solo arm - background shells, subagents and workflows must all be done first). Drop out.
+    if (!existsSync(memberPath(id))) {
+      console.log('This chat is not in a group shutdown; nothing to do.');
+    } else {
+      rmSync(memberPath(id), { force: true });
+      const remaining = liveGroupMembers();
+      if (remaining.length > 0) {
+        console.log(
+          `This chat is done and has left the group; ${remaining.length} chat` +
+            `${remaining.length === 1 ? '' : 's'} still working. The PC shuts down when the last finishes.`,
+        );
+      } else {
+        // Last one out. group-on was the consent, so writing the request + this-turn arm here is
+        // legitimate; it reuses the ordinary Stop-hook fire path so grace, flag-consumption and
+        // the staleness guard all apply unchanged. (If two chats finish at the very same instant
+        // both may see zero remaining and each arm; Windows coalesces the redundant `shutdown
+        // -s` into one countdown, so the worst case is a duplicate no-op, never a double power-off.)
+        mkdirSync(FLAG_DIR, { recursive: true });
+        writeFlagAtomic(requestPath(id), new Date().toISOString());
+        writeFlagAtomic(flagPath(id), JSON.stringify({ skip: 0, armedAt: Date.now() }));
+        try { rmSync(GROUP_DIR, { recursive: true, force: true }); } catch {}
+        console.log(
+          `Last chat done: the PC will shut down (${GRACE_SECONDS}s grace) when this response ` +
+            `finishes. Abort a started countdown: shutdown -a`,
+        );
+      }
+    }
+  } else if (action === 'group-off') {
+    // Leave the group WITHOUT shutting down; the others still fire when they finish. A full
+    // cancel of the whole group is `toggle off`.
+    const was = existsSync(memberPath(id));
+    rmSync(memberPath(id), { force: true });
+    const remaining = liveGroupMembers();
+    console.log(
+      was
+        ? `Left the group shutdown. ${remaining.length} chat${remaining.length === 1 ? '' : 's'} still armed in it.`
+        : 'This chat was not in a group shutdown.',
+    );
   } else if (action === 'off') {
-    // Per-chat disarm: cancel THIS chat only. Arming is per-chat, so cancelling
-    // must be too - disarming one chat must never silently disarm another the user
-    // still wants armed. The global power button stays lit while any OTHER chat is
-    // armed (its *.request glob still matches), which honestly signals "still armed
-    // elsewhere" rather than going dark on a shutdown that is actually still coming.
+    // Per-chat disarm for a SOLO arm: cancel THIS chat only, never another chat's independent
+    // solo arm. The group, by contrast, is one shared intent, so a master off cancels the whole
+    // group - that is not the same as silently disarming an independent chat. Aborting a started
+    // countdown is global anyway (`shutdown -a` cancels the machine's shutdown regardless of
+    // which chat armed it), so off is the honest "stop everything" control.
     rmSync(flagPath(id), { force: true });
     rmSync(requestPath(id), { force: true });
     rmSync(MACHINE_FLAG, { force: true });
+    try { rmSync(GROUP_DIR, { recursive: true, force: true }); } catch {}
     const abort = spawnSync(SHUTDOWN_EXE, ['-a'], { stdio: 'pipe' });
     console.log(
       abort.status === 0
-        ? 'Disarmed this chat (+ machine switch), and aborted a shutdown countdown that was already in flight.'
-        : 'Disarmed this chat (+ machine switch): this chat will no longer shut down the PC.',
+        ? 'Disarmed this chat and any group shutdown, and aborted a countdown that was already in flight.'
+        : 'Disarmed this chat and any group shutdown: nothing will shut the PC down.',
     );
   } else {
     const chat = existsSync(flagPath(id)) ? 'Armed for this chat.' : 'Not armed for this chat.';
     const req = existsSync(requestPath(id)) ? 'Standing request: ACTIVE.' : 'Standing request: none.';
+    const grp = existsSync(memberPath(id))
+      ? `In group shutdown (${liveGroupMembers().length} armed).`
+      : 'Not in group shutdown.';
     const machine = existsSync(MACHINE_FLAG) ? 'Machine-wide switch: ARMED.' : 'Machine-wide switch: off.';
-    console.log(`${chat} ${req} ${machine}`);
+    console.log(`${chat} ${req} ${grp} ${machine}`);
   }
   process.exit(0);
 }

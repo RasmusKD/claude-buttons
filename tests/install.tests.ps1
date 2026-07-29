@@ -227,6 +227,14 @@ Check 'off IS pre-authorised (disarming must stay friction-free)' `
 Check 'status IS pre-authorised' ([bool]($rules | Where-Object { $_ -match 'toggle\s+status' }))
 Check 'on --this-turn IS pre-authorised (the arm itself, gated by the request marker)' `
     ([bool]($rules | Where-Object { $_ -match 'toggle\s+on\s+--this-turn' }))
+# Group mode: leaving/finishing a group is friction-free, but JOINING (group-on) is the consent
+# step and is held back exactly like request-on.
+Check 'group-done IS pre-authorised (finishing a group must be frictionless)' `
+    ([bool]($rules | Where-Object { $_ -match 'toggle\s+group-done' }))
+Check 'group-off IS pre-authorised (leaving a group never powers off)' `
+    ([bool]($rules | Where-Object { $_ -match 'toggle\s+group-off' }))
+Check 'group-on is NOT pre-authorised (SEC-01: joining is the consent step)' `
+    (-not ($rules | Where-Object { $_ -match 'toggle\s+group-on' }))
 
 # ---- -OneClickArm: the waiver is OPT-IN and must stay that way ------------------------------
 # The flag removes the last approval in the arming chain on purpose. Two things are pinned:
@@ -238,6 +246,8 @@ Grant-ShutdownAllowRules $oneClick 'C:/Users/test/.claude/hooks/shutdown-on-done
 $ocRules = @($oneClick.permissions.allow)
 Check '-OneClickArm DOES pre-authorise request-on (that is its whole job)' `
     ([bool]($ocRules | Where-Object { $_ -match 'toggle\s+request-on' }))
+Check '-OneClickArm also pre-authorises group-on (one-click group arming)' `
+    ([bool]($ocRules | Where-Object { $_ -match 'toggle\s+group-on' }))
 Check '-OneClickArm still grants no wildcard (SEC-02 holds either way)' `
     (-not ($ocRules | Where-Object { $_ -match 'toggle\s+\*' }))
 
@@ -283,8 +293,14 @@ $allowLine = ($skillLines | Where-Object { $_ -match '^allowed-tools:' } | Selec
 Check 'the skill declares an allowed-tools line' ($null -ne $allowLine)
 Check 'the skill does not re-grant a toggle * wildcard (SEC-02)' ($allowLine -notmatch 'toggle \*')
 Check 'the skill does not pre-authorise request-on either (SEC-01)' ($allowLine -notmatch 'toggle request-on')
+# Group mode mirrors the solo gate: the work verbs are allowed, joining (group-on) is not.
+Check 'the skill allows group-done (finishing a group is friction-free)' ($allowLine -match 'toggle group-done')
+Check 'the skill allows group-off (leaving a group is friction-free)' ($allowLine -match 'toggle group-off')
+Check 'the skill does NOT pre-authorise group-on (SEC-01: joining is consent)' ($allowLine -notmatch 'toggle group-on\b')
 Check 'the skill body still instructs the agent to run request-on (it just prompts)' `
     ((($skillLines -join "`n") -match 'toggle request-on'))
+Check 'the skill body documents group-done at true completion' `
+    ((($skillLines -join "`n") -match 'toggle group-done'))
 
 # A fired shutdown fulfils the request; it does not stand forever. Without this, a chat resumed
 # the morning after a shutdown re-armed itself the moment the user typed - because the old

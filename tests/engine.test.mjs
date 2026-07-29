@@ -183,6 +183,80 @@ test('Stop hook: an arm just under 12h still fires normally', () => {
   assert.match(out, /\[dry-run\].*shutdown/i, 'a still-fresh arm must fire');
 });
 
+// Group ("last one out") mode: the PC shuts down only when the LAST armed chat finishes, so a
+// grid of chats each doing background work all complete before anything powers off.
+test('group-on enrols a chat and clears any solo arm (no first-out fire)', () => {
+  toggle('toggle request-on', 'gA');
+  toggle('toggle on --this-turn', 'gA');            // a solo arm first
+  const r = toggle('toggle group-on', 'gA');
+  assert.match(r.out, /group shutdown/i);
+  assert.ok(existsSync(join(flagDir(), 'group', 'gA.member')), 'joined the group');
+  assert.ok(!existsSync(join(flagDir(), 'gA.json')), 'the solo arm is cleared (cannot fire first-out)');
+  assert.ok(!existsSync(join(flagDir(), 'gA.request')), 'the solo request is cleared too');
+});
+
+test('group-done: NOT the last member does not fire, and drops out', () => {
+  toggle('toggle group-on', 'g1');
+  toggle('toggle group-on', 'g2');
+  toggle('toggle group-on', 'g3');
+  const r = toggle('toggle group-done', 'g1');
+  assert.match(r.out, /still working|still armed/i, 'must report others remain');
+  assert.doesNotMatch(r.out, /shut down.*when this response|Last chat/i);
+  assert.ok(!existsSync(join(flagDir(), 'group', 'g1.member')), 'g1 dropped out');
+  assert.ok(existsSync(join(flagDir(), 'group', 'g2.member')), 'g2 still in');
+  // Crucially no solo flag was armed for the non-last chat - nothing fires on its turn end.
+  assert.ok(!existsSync(join(flagDir(), 'g1.json')), 'a non-last chat arms no solo flag');
+});
+
+test('group-done: the LAST member arms the solo this-turn flag and fires', () => {
+  toggle('toggle group-on', 'gL1');
+  toggle('toggle group-on', 'gL2');
+  toggle('toggle group-done', 'gL1');
+  const r = toggle('toggle group-done', 'gL2');
+  assert.match(r.out, /Last chat done/i);
+  assert.ok(existsSync(join(flagDir(), 'gL2.json')), 'the last chat armed a solo flag');
+  assert.equal(JSON.parse(readFileSync(join(flagDir(), 'gL2.json'), 'utf8')).skip, 0, 'armed for THIS turn');
+  assert.ok(!existsSync(join(flagDir(), 'group')), 'the group dir is cleared once empty');
+  // ...and that solo flag fires through the ordinary Stop path.
+  const { out } = stop({ session_id: 'gL2' });
+  assert.match(out, /\[dry-run\].*shutdown/i, 'the last-out arm fires like any solo arm');
+});
+
+test('a stale group member is dropped but NEVER fires the shutdown', () => {
+  // The user chose: a stuck/forgotten chat keeps the PC on rather than triggering a surprise
+  // power-off. So a member older than 12h is cleaned up, and its removal does not fire.
+  toggle('toggle group-on', 'gLive');
+  writeFileSync(join(flagDir(), 'group', 'gStale.member'), JSON.stringify({ armedAt: Date.now() - 13 * 3600 * 1000 }));
+  // gLive finishes; gStale is stale. Dropping gStale must NOT make gLive's exit fire.
+  const r = toggle('toggle group-done', 'gLive');
+  assert.match(r.out, /Last chat done/i, 'gLive is the last LIVE member so it fires for itself');
+  // but the important half: a stale member alone never arms anything. A group holding ONLY a
+  // stale member is dropped to empty the next time anything reads it, and nothing fires.
+  rmSync(join(flagDir(), 'group'), { recursive: true, force: true });
+  mkdirSync(join(flagDir(), 'group'), { recursive: true });
+  writeFileSync(join(flagDir(), 'group', 'gOnlyStale.member'), JSON.stringify({ armedAt: Date.now() - 20 * 3600 * 1000 }));
+  // group-off always evaluates liveGroupMembers, which is what drops the stale entry.
+  toggle('toggle group-off', 'gObserver');
+  assert.ok(!existsSync(join(flagDir(), 'group', 'gOnlyStale.member')), 'the stale member is cleaned up');
+  assert.ok(!existsSync(join(flagDir(), 'gOnlyStale.json')), 'a stale member never arms a solo flag');
+});
+
+test('group-off leaves the group WITHOUT firing; others stay armed', () => {
+  toggle('toggle group-on', 'gO1');
+  toggle('toggle group-on', 'gO2');
+  const r = toggle('toggle group-off', 'gO1');
+  assert.match(r.out, /Left the group/i);
+  assert.ok(!existsSync(join(flagDir(), 'gO1.json')), 'leaving never arms a solo flag');
+  assert.ok(existsSync(join(flagDir(), 'group', 'gO2.member')), 'the other chat stays armed');
+});
+
+test('toggle off cancels the WHOLE group (shared intent), not just this chat', () => {
+  toggle('toggle group-on', 'gX1');
+  toggle('toggle group-on', 'gX2');
+  toggle('toggle off', 'gX1');
+  assert.ok(!existsSync(join(flagDir(), 'group')), 'the entire group is cleared by a master off');
+});
+
 test('Stop hook: a flag with no armedAt fails CLOSED (does not fire)', () => {
   // An un-ageable power-off is exactly the surprise the gate exists to stop, and after the
   // hook swap every real arm carries a stamp - so a stampless flag is treated as infinitely old.

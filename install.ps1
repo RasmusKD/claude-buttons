@@ -184,8 +184,12 @@ function Assert-JsonDepthSafe($obj) {
 # Testing the resulting permission set is immune to how the verb is spelled.
 function Grant-ShutdownAllowRules($settings, [string]$scriptFwd, [bool]$oneClickArm = $false) {
     Remove-AllowRules $settings 'shutdown-on-done.mjs'   # drop any old wildcard rule first
-    # request-on is deliberately absent - see the SEC-01 note at the call site.
-    $verbs = @('request-off', 'on --this-turn', 'off', 'status')
+    # request-on is deliberately absent - see the SEC-01 note at the call site. group-done and
+    # group-off are safe to pre-authorize (leaving a group never powers off; the last-out arm
+    # they produce still fires only through the gated solo path). group-on is the group's CONSENT
+    # step and is held back exactly like request-on, so an injection cannot enrol a chat toward a
+    # group power-off unattended.
+    $verbs = @('request-off', 'on --this-turn', 'off', 'status', 'group-done', 'group-off')
     # OPT-IN, OFF BY DEFAULT. Granting request-on removes the ONLY approval step in the arming
     # chain, so the panel arms in one click - and so does anything else running as this user.
     #
@@ -200,7 +204,7 @@ function Grant-ShutdownAllowRules($settings, [string]$scriptFwd, [bool]$oneClick
     # The blast radius is a 60s countdown that `shutdown -a` aborts, which is why this is
     # offered at all. For anyone who leaves the machine arming itself unattended, or who lets
     # agents read untrusted content, the default (prompt on every arm) is the right setting.
-    if ($oneClickArm) { $verbs += 'request-on' }
+    if ($oneClickArm) { $verbs += @('request-on', 'group-on') }
     foreach ($verb in $verbs) {
         Ensure-AllowRule $settings "Bash(node `"$scriptFwd`" toggle $verb)"
         Ensure-AllowRule $settings "Bash(node $scriptFwd toggle $verb)"
@@ -395,14 +399,15 @@ if ($wantShutdown) {
             $d = Join-Path $skillsDir $s
             if (Test-Path $d) { Remove-Item $d -Recurse -Force }
         }
-        # Default stateful power button (mirrors the .request marker; added once)
+        # Default stateful power buttons (mirror the on-disk markers; added once each)
         try {
             $cfg = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -eq $cfg.buttons) { $cfg | Add-Member buttons @() -Force }
+            $newBtns = @()
             if (-not (@($cfg.buttons) | Where-Object { $_.text -eq '/shutdown-on-done on' })) {
-                $cfg.buttons = @($cfg.buttons) + [pscustomobject]@{
+                $newBtns += [pscustomobject]@{
                     label = 'Shutdown on done'; short = 'Shutdown'; icon = 'power'
-                    desc = 'Shuts the PC down once this chat is COMPLETELY done with all its work (agent-judged, 60 s grace). Lit while a request is standing; click again to cancel.'
+                    desc = 'Shuts the PC down once THIS chat is COMPLETELY done with all its work (agent-judged, 60 s grace). Lit while a request is standing; click again to cancel.'
                     # No two-click confirm: this is a REVERSIBLE toggle whose off is one click
                     # and never gated, and the power-off itself has a 60s countdown that
                     # `shutdown -a` aborts. A confirm here bought nothing and cost a click on
@@ -410,10 +415,25 @@ if ($wantShutdown) {
                     toggle = $true
                     stateGlob = '%USERPROFILE%\.claude\shutdown-on-done\*.request'
                     text = '/shutdown-on-done on'; textOff = '/shutdown-on-done off'; submit = $true }
+            }
+            # Group ("last one out") button: for a grid of chats, shut down only when the LAST
+            # one finishes. Click it in each chat you want to wait for. Lit while ANY group
+            # member exists (a group shutdown is active), mirroring how the single button lights
+            # on any standing request. group-off leaves this chat; the red off cancels the group.
+            if (-not (@($cfg.buttons) | Where-Object { $_.text -eq '/shutdown-on-done group-on' })) {
+                $newBtns += [pscustomobject]@{
+                    label = 'Group shutdown'; short = 'Group'; icon = 'grid'
+                    desc = 'Shuts the PC down once ALL grouped chats are done - the LAST one to finish triggers it (agent-judged, 60 s grace). Click in each chat you want to wait for. Lit while a group shutdown is active; click again to leave the group.'
+                    toggle = $true
+                    stateGlob = '%USERPROFILE%\.claude\shutdown-on-done\group\*.member'
+                    text = '/shutdown-on-done group-on'; textOff = '/shutdown-on-done group-off'; submit = $true }
+            }
+            if ($newBtns.Count) {
+                $cfg.buttons = @($cfg.buttons) + $newBtns
                 Write-JsonAtomic $cfgPath ($cfg | ConvertTo-Json -Depth 100)
             }
         } catch {}
-        Write-Host "  + Shutdown-on-done engine installed (completion-judged; power button added to the panel)." -ForegroundColor DarkGray
+        Write-Host "  + Shutdown-on-done engine installed (completion-judged; power + group buttons added to the panel)." -ForegroundColor DarkGray
     }
 }
 
