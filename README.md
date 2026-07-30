@@ -163,6 +163,7 @@ The file the panel reads (created from `buttons.default.json` on first install, 
 | `relX` | `0.0` | Horizontal position within the pane (0–1). |
 | `vNudge` | `0` | Vertical nudge in px (+ down, − up). Use this when the strip sits a few px off after an app update. |
 | `tipsOff` | `false` | Hover tooltips off. Set from the ⋮ menu and written back here, so you may see it appear in your file. |
+| `hideFromCapture` | `true` | Keep the strips out of screenshots and screen recordings (they still show on your actual display). On by default so the strips don't bleed into a screenshot of a window covering Claude. Toggle from the ⋮ menu. |
 | `lang` | `"en"` | UI language: `en` or `da`. |
 
 Per-button fields:

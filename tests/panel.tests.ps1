@@ -392,6 +392,33 @@ if ($togFill -and $togFore -and $bar) {
     }
 }
 
+# --- Strips are excluded from screen capture (PrintScreen/Snip/recording) ---
+# The always-on-top strips are docked on Claude and are TopMost, so they bled into a
+# screenshot of any window sitting over Claude. WDA_EXCLUDEFROMCAPTURE hides them from
+# captures while leaving them on the physical display. Every strip type derives from
+# NoActivateForm, so the exclusion must live in that class (not per-callsite) to catch the
+# lazily-created mirrors + side strips too.
+Check 'the capture-exclusion P/Invoke is declared' ($srcText -match 'SetWindowDisplayAffinity')
+Check 'WDA_EXCLUDEFROMCAPTURE (0x11) is the affinity used' ($srcText -match 'WDA_EXCLUDEFROMCAPTURE\s*=\s*0x00000011')
+Check 'affinity is applied from OnHandleCreated (survives handle recreation)' (
+    $srcText -match '(?s)protected override void OnHandleCreated[\s\S]{0,200}?ApplyCaptureAffinity\(this\.Handle')
+Check 'the exclusion default is ON' ($srcText -match 'public static bool CaptureExcluded\s*=\s*true')
+Check 'an older-OS fallback to WDA_MONITOR exists' (
+    $srcText -match '(?s)EXCLUDEFROMCAPTURE\)\)\s*SetWindowDisplayAffinity\(h,\s*WDA_MONITOR')
+# The grip-menu toggle must re-apply to strips that already exist, not just future ones.
+Check 'a Hide-from-screenshots grip item is wired' ($srcText -match "ToolStripMenuItem 'Hide from screenshots'")
+Check 'the toggle calls Set-CaptureHidden' ($srcText -match 'Set-CaptureHidden \$script:hideFromCapture')
+Check 'Set-CaptureHidden re-applies to mirrors and side strips' (
+    ($srcText -match '(?s)function Set-CaptureHidden[\s\S]{0,600}?\$script:mirrors') -and
+    ($srcText -match '(?s)function Set-CaptureHidden[\s\S]{0,600}?\$script:sideStrips'))
+Check 'hideFromCapture is persisted' ($srcText -match 'hideFromCapture -NotePropertyValue')
+# The static must be set from config BEFORE the first strip form is built (line order matters:
+# OnHandleCreated reads the static at handle-creation time).
+$staticSetLine = ($src | Select-String -Pattern '\[NoActivateForm\]::CaptureExcluded = \$script:hideFromCapture' | Select-Object -First 1).LineNumber
+$firstFormLine = ($src | Select-String -Pattern 'New-Object LayeredForm' | Select-Object -First 1).LineNumber
+Check 'the capture default is set before the first LayeredForm is created' (
+    ($staticSetLine -gt 0) -and ($firstFormLine -gt 0) -and ($staticSetLine -lt $firstFormLine))
+
 # --- Docs must describe code that exists ---
 # The README documented two config knobs (uiaPaneName, uiaSidebarName) that were parsed and
 # then never read again - and the troubleshooting section told users to edit them to recover

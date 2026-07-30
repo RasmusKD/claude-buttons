@@ -21,7 +21,7 @@ param(
 # Claude Buttons - a slim button strip that docks onto the Claude desktop app's bottom bar.
 # - Visible only when the Claude window itself is in the foreground
 # - Click (or right-click) the vertical 3-dot kebab for the menu
-#   (pin new button / language / hover tooltips / close panel)
+#   (pin new button / language / hover tooltips / hide from screenshots / close panel)
 # - Global buttons + buttons pinned to the currently displayed chat
 # - buttons.json auto-reloads; all writes merge against a fresh file (atomic + retry, locked)
 # - Buttons with "confirm": true require two clicks (Confirm?)
@@ -115,8 +115,29 @@ public static class CkDpi {
 }
 
 public class NoActivateForm : Form {
+    [DllImport("user32.dll", SetLastError = true)] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
+    const uint WDA_NONE = 0x00000000;
+    const uint WDA_MONITOR = 0x00000001;
+    const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+    // Keep the always-on-top strips out of screen captures (PrintScreen, Snip & Sketch,
+    // screen recording, share). They still render normally on the physical display - this
+    // only affects what a capture sees, so the strips no longer bleed into a screenshot of
+    // a window that sits over Claude. WDA_EXCLUDEFROMCAPTURE (Win10 2004+) leaves whatever
+    // is behind the strip visible in the capture; on older builds we fall back to
+    // WDA_MONITOR (the strip shows as a blank block instead of showing through). Re-applied
+    // from OnHandleCreated so a handle recreation can't silently drop the exclusion.
+    public static bool CaptureExcluded = true;
+    public static void ApplyCaptureAffinity(IntPtr h, bool exclude) {
+        if (h == IntPtr.Zero) return;
+        if (!exclude) { SetWindowDisplayAffinity(h, WDA_NONE); return; }
+        if (!SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE)) SetWindowDisplayAffinity(h, WDA_MONITOR);
+    }
     public NoActivateForm() { this.DoubleBuffered = true; }
     protected override bool ShowWithoutActivation { get { return true; } }
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        ApplyCaptureAffinity(this.Handle, CaptureExcluded);
+    }
     protected override CreateParams CreateParams {
         get {
             CreateParams p = base.CreateParams;
@@ -903,6 +924,11 @@ if ($null -ne $script:config.relX) { $script:relX = [double]$script:config.relX 
 $script:vNudge = [int]$script:config.vNudge   # vertical nudge in px (+ = down, - = up); 0 if unset
 $script:tipCtrl = $null    # control the hover tip is currently showing for
 $script:tipsOff = [bool]$script:config.tipsOff   # hover-tooltip off switch (grip menu; persisted)
+# Keep the strips out of screenshots/recordings (grip menu; persisted). Default ON: the
+# strips are docked on Claude and would otherwise bleed into a capture of any window over it.
+# Must be set BEFORE the first strip form is created so its handle picks up the affinity.
+$script:hideFromCapture = if ($null -ne $script:config.hideFromCapture) { [bool]$script:config.hideFromCapture } else { $true }
+[NoActivateForm]::CaptureExcluded = $script:hideFromCapture
 $script:kebabBar = 'row'                         # which bar the kebab itself lives on
 $script:debugPaste = [bool]$script:config.debugPaste   # dump WANT/GOT text on a paste mismatch
 if ($script:config.kebabBar) { $script:kebabBar = [string]$script:config.kebabBar }
@@ -1005,10 +1031,29 @@ function Save-PanelState {
         $fresh | Add-Member -NotePropertyName lang -NotePropertyValue $script:lang -Force
         $fresh | Add-Member -NotePropertyName relX -NotePropertyValue ([Math]::Round($script:relX, 4)) -Force
         $fresh | Add-Member -NotePropertyName tipsOff -NotePropertyValue ([bool]$script:tipsOff) -Force
+        $fresh | Add-Member -NotePropertyName hideFromCapture -NotePropertyValue ([bool]$script:hideFromCapture) -Force
         # Strip is statically docked; drop any legacy free-placement / offset fields.
         foreach ($legacy in @('freeX', 'freeY', 'x', 'y', 'offsetX', 'offsetY', 'offsetBottom')) { $fresh.PSObject.Properties.Remove($legacy) }
         [void](Write-ConfigAtomic $fresh)
     } finally { [void]$script:cfgLock.ReleaseMutex() }
+}
+
+# Flip screen-capture exclusion on every live strip. New forms pick up the static default in
+# OnHandleCreated; this re-applies to the ones already created (main strip, tip, flyout, and
+# every lazily-created mirror + side strip) so the grip-menu toggle takes effect immediately.
+function Set-CaptureHidden([bool]$hide) {
+    [NoActivateForm]::CaptureExcluded = $hide
+    $forms = [System.Collections.Generic.List[System.Windows.Forms.Form]]::new()
+    if ($form) { $forms.Add($form) }
+    if ($tipForm) { $forms.Add($tipForm) }
+    if ($script:flyForm) { $forms.Add($script:flyForm) }
+    foreach ($m in $script:mirrors) { if ($m.Form) { $forms.Add($m.Form) } }
+    foreach ($s in $script:sideStrips) { if ($s.Form) { $forms.Add($s.Form) } }
+    foreach ($f in $forms) {
+        if ($f -and -not $f.IsDisposed -and $f.IsHandleCreated) {
+            [NoActivateForm]::ApplyCaptureAffinity($f.Handle, $hide)
+        }
+    }
 }
 
 # Transform the buttons array against a FRESH file (merge, don't overwrite) and update memory
@@ -2638,6 +2683,15 @@ $miTips.add_Click({
     Save-PanelState
 })
 [void]$gripMenu.Items.Add($miTips)
+$miHideShot = New-Object System.Windows.Forms.ToolStripMenuItem 'Hide from screenshots'
+$miHideShot.CheckOnClick = $true
+$miHideShot.Checked = [bool]$script:hideFromCapture
+$miHideShot.add_Click({
+    $script:hideFromCapture = [bool]$this.Checked
+    Set-CaptureHidden $script:hideFromCapture
+    Save-PanelState
+})
+[void]$gripMenu.Items.Add($miHideShot)
 [void]$gripMenu.Items.Add('-')
 $miClose = $gripMenu.Items.Add('Close panel')
 $miClose.add_Click({ $form.Close() })
