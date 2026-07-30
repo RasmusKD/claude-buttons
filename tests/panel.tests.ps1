@@ -1012,6 +1012,43 @@ Check 'a normal toggle prefers textOn when provided' ((Resolve-ToggleSend $onWit
 $plainBtn = [pscustomobject]@{ text = '/compact' }
 Check 'a non-toggle button sends its plain text' ((Resolve-ToggleSend $plainBtn $false).Text -eq '/compact')
 
+# --- Busy detection: a background task badge (floating above the composer) must read BUSY ---
+# The dangerous direction is misreading a working pane as idle and powering off on live work.
+# Regression guard for the real bug found live: the 'N running task' badge sits ABOVE the
+# composer, outside the tight Stop band, so a task-only pane was read idle.
+$pbNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-PaneBusy' }, $true)
+Check 'Test-PaneBusy was found' ($null -ne $pbNode)
+. ([scriptblock]::Create($pbNode.Extent.Text))
+# Two panes stacked in one column: top composer at y=613, bottom at y=1287 (as measured).
+$twoComposers = @(
+    [pscustomobject]@{ X = 868; Y = 613; W = 438; H = 90 },
+    [pscustomobject]@{ X = 868; Y = 1287; W = 438; H = 90 }
+)
+$B = { param($n, $x, $y) @{ Name = $n; X = [double]$x; Y = [double]$y; W = 30.0; H = 24.0 } }
+
+# Idle pane: only a 'Send' button, no Stop/task.
+Check 'a pane with only Send reads idle' `
+    (-not (Test-PaneBusy 868 613 438 90 $twoComposers @((& $B 'Send' 1300 625))))
+# Generating: a Stop at the composer.
+Check 'a Stop at the composer reads BUSY' `
+    (Test-PaneBusy 868 613 438 90 $twoComposers @((& $B 'Stop' 1300 625)))
+# THE BUG: a task badge floating 80-145px ABOVE the composer top must still read BUSY.
+Check 'a running-task badge above the composer reads BUSY (the live bug)' `
+    (Test-PaneBusy 868 613 438 90 $twoComposers @((& $B '1 running task' 917 531)))
+Check 'the plural "N running tasks" badge also reads BUSY' `
+    (Test-PaneBusy 868 613 438 90 $twoComposers @((& $B '2 running tasks' 917 469)))
+# Attribution: the top pane's badge must NOT make the BOTTOM pane busy.
+Check 'a top-row task badge does not mark the bottom-row pane busy' `
+    (-not (Test-PaneBusy 868 1287 438 90 $twoComposers @((& $B '1 running task' 917 531))))
+Check 'the bottom pane reads BUSY from its OWN badge' `
+    (Test-PaneBusy 868 1287 438 90 $twoComposers @((& $B '1 running task' 917 1200)))
+# Column isolation: a Stop in a DIFFERENT column does not mark this pane.
+Check 'a Stop in another column is ignored' `
+    (-not (Test-PaneBusy 868 613 438 90 $twoComposers @((& $B 'Stop' 1900 625))))
+# A chat title merely containing "running" is not a task badge.
+Check 'a title containing the word running is not a task badge' `
+    (-not (Test-PaneBusy 868 613 438 90 $twoComposers @((& $B 'running Pushing attempt 9' 900 560))))
+
 # --- Grid watcher: fire only when EVERY pane has been idle past the threshold ---
 # Drive the real Update-GridWatch with a stubbed pane set and a temp marker so the idle/busy
 # state machine is exercised, not re-described. Write-CkLog is stubbed to a no-op for silence.

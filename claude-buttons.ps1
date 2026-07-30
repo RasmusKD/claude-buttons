@@ -1660,6 +1660,38 @@ function Enable-WebA11y {
     } catch {}
 }
 
+# Is a pane still working? MEASURED signal, pure and testable so a shutdown trigger cannot
+# regress silently. A generating pane shows a 'Stop' button (idle shows 'Send'); a pane with a
+# background task shows an 'N running task(s)' badge. Getting the task case wrong is the
+# dangerous direction - it would let the PC power off on live background work - so:
+#   - 'Stop' sits AT the composer: a tight band around it, in this pane's column.
+#   - the task badge FLOATS in the message area above the composer at a varying height, so it is
+#     matched by COLUMN and attributed to the vertically-closest composer in that column, which
+#     can never hand one row's task to an adjacent row.
+# $comps and $btns are plain {X,Y,W,H(,Name)} objects so tests can drive this without UIA.
+function Test-PaneBusy($cx, $cy, $cw, $ch, $comps, $btns) {
+    foreach ($b in $btns) {
+        $isStop = ($b.Name -eq 'Stop')
+        $isTask = ($b.Name -match '^\d+\s+running task')
+        if (-not ($isStop -or $isTask)) { continue }
+        $bcx = $b.X + $b.W / 2; $bcy = $b.Y + $b.H / 2
+        if ($bcx -lt ($cx - 40) -or $bcx -gt ($cx + $cw + 40)) { continue }   # not this column
+        if ($isStop) {
+            if ($bcy -ge ($cy - 40) -and $bcy -le ($cy + $ch + 140)) { return $true }
+        } else {
+            $nearest = $null; $nd = [double]::MaxValue
+            foreach ($cc in $comps) {
+                $ccx = $cc.X + $cc.W / 2
+                if ($ccx -lt ($cx - 40) -or $ccx -gt ($cx + $cw + 40)) { continue }
+                $dy = [Math]::Abs(($cc.Y + $cc.H / 2) - $bcy)
+                if ($dy -lt $nd) { $nd = $dy; $nearest = $cc }
+            }
+            if ($nearest -and $nearest.X -eq $cx -and $nearest.Y -eq $cy) { return $true }
+        }
+    }
+    return $false
+}
+
 # The chat composers: keyboard-focusable Groups named "Prompt", one per pane. Their positions
 # ARE the pane layout (works for any split/grid), and each is the focus target for sending.
 function Get-Composers($root) {
@@ -1734,6 +1766,11 @@ function Update-UiaInfo {
             # just below the input) so we dock the strip AFTER that left cluster, on that row -
             # exactly where it sat before, but per pane.
             $allBtns = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
+            # Plain {Name,X,Y,W,H} snapshot for the pure busy predicate (Test-PaneBusy).
+            $btnList = @($allBtns | ForEach-Object {
+                    $bb = $_.Cached.BoundingRectangle
+                    @{ Name = [string]$_.Cached.Name; X = $bb.X; Y = $bb.Y; W = $bb.Width; H = $bb.Height }
+                })
             foreach ($c in $composers) {
                 $cBottom = $c.Y + $c.H
                 # Collect the control-row buttons just below this composer (its left half).
@@ -1861,21 +1898,10 @@ function Update-UiaInfo {
                         $dockY = [int]($cBottom + (SW 20))
                     }
                 }
-                # Is THIS pane generating? Measured signal (not a guess): a busy pane shows a
-                # 'Stop' button where an idle one shows 'Send', and background work shows an
-                # 'N running task' button. Either, sitting in this pane's column and in the band
-                # around its composer, means the chat is still working. The grid-watcher reads
-                # this to decide when EVERY pane has gone quiet.
-                $busy = $false
-                foreach ($b in $allBtns) {
-                    $nm = [string]$b.Cached.Name
-                    if ($nm -eq 'Stop' -or $nm -match '^\d+\s+running task') {
-                        $bb = $b.Cached.BoundingRectangle
-                        $bcx = $bb.X + $bb.Width / 2; $bcy = $bb.Y + $bb.Height / 2
-                        if ($bcx -ge ($c.X - 40) -and $bcx -le ($c.X + $c.W + 40) -and
-                            $bcy -ge ($c.Y - 40) -and $bcy -le ($c.Y + $c.H + 140)) { $busy = $true; break }
-                    }
-                }
+                # Is THIS pane still working? Stop button (generating) or a running-task badge
+                # (background work). Computed by the pure Test-PaneBusy so the rule is unit-tested;
+                # see its definition for why the two signals are matched differently.
+                $busy = Test-PaneBusy $c.X $c.Y $c.W $c.H $composers $btnList
                 $newPanes += @{
                     OffL = $c.X - $wr.Left; OffT = $c.Y - $wr.Top; Width = $c.W
                     BottomOff = 0; Title = $null; RowCenter = $null; LeftOff = $null
