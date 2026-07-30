@@ -378,8 +378,12 @@ if ($togFill -and $togFore -and $bar) {
     # literal on failure, it silently compared two constants written in this file and asserted
     # nothing about the code at all. A parse failure must FAIL the test, never substitute the
     # expected answer. There is no fallback here for that reason.
+    # The dot brush and its FillEllipse are no longer adjacent: an if (Glyph) picks a corner
+    # badge vs an inline dot between them. Still specific to the dot (only the dot brush uses a
+    # literal 3-int FromArgb; the fills use FromArgb(255, f) / a ternary), just allowing the
+    # branch in between.
     $dotMatches = [regex]::Matches(($src -join "`n"),
-        'new SolidBrush\(Color\.FromArgb\((\d+),\s*(\d+),\s*(\d+)\)\)+\s*\r?\n\s*g\.FillEllipse')
+        'new SolidBrush\(Color\.FromArgb\((\d+),\s*(\d+),\s*(\d+)\)+\s*\{[\s\S]{0,500}?g\.FillEllipse')
     Check 'the toggle dot colour is parseable from BOTH paint paths' ($dotMatches.Count -ge 2)
     foreach ($dm in $dotMatches) {
         $dot = @([int]$dm.Groups[1].Value, [int]$dm.Groups[2].Value, [int]$dm.Groups[3].Value)

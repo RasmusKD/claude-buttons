@@ -257,14 +257,23 @@ public class PillButton : Control {
             using (var path = RoundRect(rc, rad))
             using (var pen = new Pen(Accent, 2f)) g.DrawPath(pen, path);
         }
-        // Toggle-on gets a NON-COLOR cue (a bright left dot) so state isn't conveyed by fill alone.
+        // Toggle-on gets a NON-COLOR cue (a bright amber dot) so state isn't conveyed by fill
+        // alone. On a LABEL button the dot sits inline to the left and the text shifts over for
+        // it. On an ICON-ONLY button that shift pushed the glyph off-centre, so there the dot is
+        // a small top-left corner badge instead and the glyph stays centred in the full width.
         int textLeft = 0;
         if (toggled) {
-            int dd = Math.Max(4, Height / 3);
-            int dx = Math.Max(3, (Height - dd) / 2);
-            using (var b = new SolidBrush(Color.FromArgb(236, 200, 130)))
-                g.FillEllipse(b, dx, (Height - dd) / 2, dd, dd);
-            textLeft = dx + dd;
+            using (var b = new SolidBrush(Color.FromArgb(236, 200, 130))) {
+                if (Glyph) {
+                    int dd = Math.Max(4, Height / 4);
+                    g.FillEllipse(b, 2, 2, dd, dd);
+                } else {
+                    int dd = Math.Max(4, Height / 3);
+                    int dx = Math.Max(3, (Height - dd) / 2);
+                    g.FillEllipse(b, dx, (Height - dd) / 2, dd, dd);
+                    textLeft = dx + dd;
+                }
+            }
         }
         TextRenderer.DrawText(g, Text, Font, new Rectangle(textLeft, 0, Width - textLeft, Height),
             toggled ? ToggleFore : ForeColor,
@@ -294,13 +303,21 @@ public class PillButton : Control {
             using (var path = RoundRect(rcEdge, rad))
             using (var pen = new Pen(Accent, 2f)) g.DrawPath(pen, path);
         }
+        // Armed cue (see the on-screen path): inline dot + text shift for LABEL buttons, but a
+        // small top-left corner badge for ICON buttons so the glyph stays centred, not pushed.
         int textLeft = 0;
         if (toggled) {
-            int dd = Math.Max(4, Height / 3);
-            int dx = Math.Max(3, (Height - dd) / 2);
-            using (var b = new SolidBrush(Color.FromArgb(236, 200, 130)))
-                g.FillEllipse(b, ox + dx, oy + (Height - dd) / 2, dd, dd);
-            textLeft = dx + dd;
+            using (var b = new SolidBrush(Color.FromArgb(236, 200, 130))) {
+                if (Glyph) {
+                    int dd = Math.Max(4, Height / 4);
+                    g.FillEllipse(b, ox + 2, oy + 2, dd, dd);
+                } else {
+                    int dd = Math.Max(4, Height / 3);
+                    int dx = Math.Max(3, (Height - dd) / 2);
+                    g.FillEllipse(b, ox + dx, oy + (Height - dd) / 2, dd, dd);
+                    textLeft = dx + dd;
+                }
+            }
         }
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
         using (var sf = new StringFormat()) {
