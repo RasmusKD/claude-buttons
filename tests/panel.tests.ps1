@@ -377,27 +377,32 @@ if ($togFill -and $togFore -and $bar) {
     $cue = Ratio $togFill $bar
     Check ("toggle-ON label is readable: {0:N2}:1 >= 4.5 (WCAG 1.4.3)" -f $fg) ($fg -ge 4.5)
     Check ("toggle-ON state cue holds: {0:N2}:1 >= 3.0 (WCAG 1.4.11)" -f $cue) ($cue -ge 3.0)
-    # The filled dot is the NON-COLOUR cue for the on-state, and it was failing at 2.93:1
-    # before the fill was darkened - it passes now only by 0.20. Assert it, or the next fill
-    # tweak silently re-breaks the one cue a colour-blind user relies on.
+    # ToggleCue is the single lit-state cue colour: a LABEL toggle's inline dot (on the wash)
+    # and a lit ICON toggle's glyph + taskbar-style underline (on the bare bar). Both uses are
+    # non-text state indicators, so both sides carry WCAG 1.4.11's 3:1.
     #
-    # NOTE ON THE SHAPE OF THIS CHECK: the first version of it had the regex written in the
-    # wrong source order, so it never matched - and because it fell back to a hardcoded
-    # literal on failure, it silently compared two constants written in this file and asserted
-    # nothing about the code at all. A parse failure must FAIL the test, never substitute the
-    # expected answer. There is no fallback here for that reason.
-    # The dot brush and its FillEllipse are no longer adjacent: an if (Glyph) picks a corner
-    # badge vs an inline dot between them. Still specific to the dot (only the dot brush uses a
-    # literal 3-int FromArgb; the fills use FromArgb(255, f) / a ternary), just allowing the
-    # branch in between.
-    $dotMatches = [regex]::Matches(($src -join "`n"),
-        'new SolidBrush\(Color\.FromArgb\((\d+),\s*(\d+),\s*(\d+)\)+\s*\{[\s\S]{0,500}?g\.FillEllipse')
-    Check 'the toggle dot colour is parseable from BOTH paint paths' ($dotMatches.Count -ge 2)
-    foreach ($dm in $dotMatches) {
-        $dot = @([int]$dm.Groups[1].Value, [int]$dm.Groups[2].Value, [int]$dm.Groups[3].Value)
-        $dotCue = Ratio $dot $togFill
-        Check ("toggle-ON dot (non-colour cue): {0:N2}:1 >= 3.0 (WCAG 1.4.11)" -f $dotCue) ($dotCue -ge 3.0)
+    # NOTE ON THE SHAPE OF THESE CHECKS: an early version of the dot check fell back to a
+    # hardcoded literal when its regex failed to match - so it silently compared two constants
+    # written in this file and asserted nothing about the code. A parse failure must FAIL the
+    # test, never substitute the expected answer. No fallbacks here for that reason.
+    $togCue = ArgbFrom 'ToggleCue\s*=\s*Color\.FromArgb\((\d+),\s*(\d+),\s*(\d+)\)'
+    Check 'the ToggleCue colour is parseable from source' ($null -ne $togCue)
+    if ($togCue) {
+        $dotCue = Ratio $togCue $togFill
+        Check ("label dot (non-colour cue) vs wash: {0:N2}:1 >= 3.0 (WCAG 1.4.11)" -f $dotCue) ($dotCue -ge 3.0)
+        $glyphCue = Ratio $togCue $bar
+        Check ("lit glyph + underline vs bar: {0:N2}:1 >= 3.0 (WCAG 1.4.11)" -f $glyphCue) ($glyphCue -ge 3.0)
     }
+    # Structure: BOTH paint paths (on-screen + layered composite) must draw the label dot AND
+    # the icon underline from ToggleCue, colour the lit glyph itself, and keep the wash off
+    # icon buttons. Losing any of these in one path shows a different state on mirrors than on
+    # the primary strip.
+    $cueBrushes = [regex]::Matches($srcText, 'new SolidBrush\(ToggleCue\)')
+    Check 'both paths draw both cues from ToggleCue (4 brush sites)' ($cueBrushes.Count -ge 4)
+    Check 'both paths draw the label dot' (([regex]::Matches($srcText, '(?s)new SolidBrush\(ToggleCue\)\)\s*\{[\s\S]{0,300}?FillEllipse')).Count -ge 2)
+    Check 'both paths draw the icon underline' (([regex]::Matches($srcText, '(?s)new SolidBrush\(ToggleCue\)\)\s*\{[\s\S]{0,300}?FillRectangle')).Count -ge 2)
+    Check 'both paths colour the lit glyph itself' (([regex]::Matches($srcText, 'toggled \? \(Glyph \? ToggleCue : ToggleFore\) : ForeColor')).Count -ge 2)
+    Check 'both paths keep the wash OFF icon buttons' (([regex]::Matches($srcText, 'washed = toggled && !Glyph')).Count -ge 2)
 }
 
 # --- Strips are excluded from screen capture (PrintScreen/Snip/recording) ---

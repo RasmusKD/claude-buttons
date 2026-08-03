@@ -213,14 +213,17 @@ public class PillButton : Control {
     public Color Fill = Color.FromArgb(48, 47, 44);
     public Color HoverFill = Color.FromArgb(60, 58, 54);
     public Color DownFill = Color.FromArgb(70, 67, 62);
-    // Active state for toggle buttons. Two constraints pull against each other: the fill must
-    // separate from the bar (WCAG 1.4.11, 3:1) AND the label/glyph on top of it must stay
-    // readable (1.4.3, 4.5:1). The old pairing satisfied only the first - a grey glyph on the
-    // old fill measured 1.96:1, so the lit state was the LEAST legible state in the product,
-    // and that is the state the shutdown power button uses to mean "this PC is armed to power
-    // off". Darkening the fill alone breaks the state cue, so the foreground brightens too.
-    public Color ToggleFill = Color.FromArgb(144, 102, 36);  // 3.30:1 vs the bar
+    // Active state for LABEL toggle buttons (icons light their glyph via ToggleCue instead).
+    // Two constraints pull against each other: the fill must separate from the bar (WCAG
+    // 1.4.11, 3:1) AND the label on top of it must stay readable (1.4.3, 4.5:1). The old
+    // pairing satisfied only the first - the lit state measured 1.96:1 and was the LEAST
+    // legible state in the product. Darkening the fill alone breaks the state cue, so the
+    // foreground brightens too.
+    public Color ToggleFill = Color.FromArgb(144, 102, 36);  // 3.30:1 vs the bar (label wash)
     public Color ToggleFore = Color.FromArgb(255, 255, 255); // 5.11:1 on ToggleFill
+    // The lit-state cue colour: a label's inline dot, and a lit ICON's glyph + underline.
+    // ~10:1 against the bar (asserted in the tests, WCAG 1.4.11).
+    public Color ToggleCue = Color.FromArgb(236, 200, 130);
     public Color Accent = Color.Empty; // border on per-chat buttons
     public bool Bold = false;          // draw the glyph with extra stroke weight (icons)
     public bool Glyph = false;         // the Text is an icon glyph, so centre its INK, not its metrics box
@@ -266,10 +269,12 @@ public class PillButton : Control {
         var rc = new Rectangle(0, 0, Width - 1, Height - 1);
         int rad = Math.Max(4, Height / 4);   // rounded corners, not a full pill/circle
         // Resting buttons have NO background - they sit transparent on the bar like Claude's
-        // own toolbar icons. A rounded-corner highlight appears only on hover/press; a
-        // toggled button stays highlighted so its "on" state is visible.
-        if (hover || down || toggled) {
-            Color f = down ? DownFill : (toggled ? ToggleFill : HoverFill);
+        // own toolbar icons. A rounded-corner highlight appears only on hover/press. A lit
+        // LABEL toggle keeps the classic wash; a lit ICON toggle lights the glyph itself
+        // instead (below), so no wash there.
+        bool washed = toggled && !Glyph;
+        if (hover || down || washed) {
+            Color f = down ? DownFill : (washed ? ToggleFill : HoverFill);
             using (var path = RoundRect(rc, rad))
             using (var b = new SolidBrush(f)) g.FillPath(b, path);
         }
@@ -278,26 +283,28 @@ public class PillButton : Control {
             using (var path = RoundRect(rc, rad))
             using (var pen = new Pen(Accent, 2f)) g.DrawPath(pen, path);
         }
-        // Toggle-on gets a NON-COLOR cue (a bright amber dot) so state isn't conveyed by fill
-        // alone. On a LABEL button the dot sits inline to the left and the text shifts over for
-        // it. On an ICON-ONLY button that shift pushed the glyph off-centre, so there the dot is
-        // a small top-left corner badge instead and the glyph stays centred in the full width.
+        // Lit state. A LABEL button: wash + an inline dot (the non-colour cue), text shifted
+        // over for it. An ICON button: the glyph itself draws in the cue colour with a thin
+        // taskbar-style underline - the underline is the non-colour cue (a shape appears;
+        // WCAG 1.4.1), and the glyph stays centred with nothing crowding it.
         int textLeft = 0;
-        if (toggled) {
-            using (var b = new SolidBrush(Color.FromArgb(236, 200, 130))) {
-                if (Glyph) {
-                    int dd = Math.Max(4, Height / 4);
-                    g.FillEllipse(b, 2, 2, dd, dd);
-                } else {
-                    int dd = Math.Max(4, Height / 3);
-                    int dx = Math.Max(3, (Height - dd) / 2);
-                    g.FillEllipse(b, dx, (Height - dd) / 2, dd, dd);
-                    textLeft = dx + dd;
-                }
+        if (washed) {
+            using (var b = new SolidBrush(ToggleCue)) {
+                int dd = Math.Max(4, Height / 3);
+                int dx = Math.Max(3, (Height - dd) / 2);
+                g.FillEllipse(b, dx, (Height - dd) / 2, dd, dd);
+                textLeft = dx + dd;
+            }
+        }
+        if (toggled && Glyph) {
+            using (var b = new SolidBrush(ToggleCue)) {
+                int th = Math.Max(2, Height / 12);
+                int uw = Math.Max(8, Width * 3 / 5);
+                g.FillRectangle(b, (Width - uw) / 2, Height - th - 1, uw, th);
             }
         }
         TextRenderer.DrawText(g, Text, Font, new Rectangle(textLeft, 0, Width - textLeft, Height),
-            toggled ? ToggleFore : ForeColor,
+            toggled ? (Glyph ? ToggleCue : ToggleFore) : ForeColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
     }
     // Composite this button onto a transparent ARGB surface at (ox,oy). The whole
@@ -315,8 +322,9 @@ public class PillButton : Control {
         var rcFill = new Rectangle(ox, oy, Width, Height - 1);
         var rcEdge = new Rectangle(ox, oy, Width - 1, Height - 1);
         int rad = Math.Max(4, Height / 4);
-        if (hover || down || toggled) {
-            Color f = down ? DownFill : (toggled ? ToggleFill : HoverFill);
+        bool washed = toggled && !Glyph;   // a lit ICON lights its glyph instead (below)
+        if (hover || down || washed) {
+            Color f = down ? DownFill : (washed ? ToggleFill : HoverFill);
             using (var path = RoundRect(rcFill, rad))
             using (var b = new SolidBrush(Color.FromArgb(255, f))) g.FillPath(b, path);
         }
@@ -324,20 +332,22 @@ public class PillButton : Control {
             using (var path = RoundRect(rcEdge, rad))
             using (var pen = new Pen(Accent, 2f)) g.DrawPath(pen, path);
         }
-        // Armed cue (see the on-screen path): inline dot + text shift for LABEL buttons, but a
-        // small top-left corner badge for ICON buttons so the glyph stays centred, not pushed.
+        // Lit cue (see the on-screen path): inline dot + text shift for LABEL buttons; for
+        // ICON buttons the glyph draws in the cue colour with a taskbar-style underline.
         int textLeft = 0;
-        if (toggled) {
-            using (var b = new SolidBrush(Color.FromArgb(236, 200, 130))) {
-                if (Glyph) {
-                    int dd = Math.Max(4, Height / 4);
-                    g.FillEllipse(b, ox + 2, oy + 2, dd, dd);
-                } else {
-                    int dd = Math.Max(4, Height / 3);
-                    int dx = Math.Max(3, (Height - dd) / 2);
-                    g.FillEllipse(b, ox + dx, oy + (Height - dd) / 2, dd, dd);
-                    textLeft = dx + dd;
-                }
+        if (washed) {
+            using (var b = new SolidBrush(ToggleCue)) {
+                int dd = Math.Max(4, Height / 3);
+                int dx = Math.Max(3, (Height - dd) / 2);
+                g.FillEllipse(b, ox + dx, oy + (Height - dd) / 2, dd, dd);
+                textLeft = dx + dd;
+            }
+        }
+        if (toggled && Glyph) {
+            using (var b = new SolidBrush(ToggleCue)) {
+                int th = Math.Max(2, Height / 12);
+                int uw = Math.Max(8, Width * 3 / 5);
+                g.FillRectangle(b, ox + (Width - uw) / 2, oy + Height - th - 1, uw, th);
             }
         }
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
@@ -353,7 +363,7 @@ public class PillButton : Control {
                 var ink = GlyphInk.Offset(Text, Font);
                 rect.Offset(ink.X, ink.Y);
             }
-            using (var b = new SolidBrush(toggled ? ToggleFore : ForeColor)) {
+            using (var b = new SolidBrush(toggled ? (Glyph ? ToggleCue : ToggleFore) : ForeColor)) {
                 if (Bold) {
                     // Faux-bold: redraw the glyph at sub-pixel offsets to thicken strokes
                     // without enlarging the icon (Segoe Fluent Icons has no bold weight).
@@ -2770,6 +2780,12 @@ $gripMenu.add_Opening({
 
 # ---------- Button context menu (capture source on right mouse-down) ----------
 $script:menuSource = $null
+# Which bar the right-clicked button lives on ('row' or a side) - drives the move labels and
+# their direction mapping.
+function Get-MenuSourceBar {
+    if ($script:menuSource -and $script:menuSource.Tag) { return (Get-ButtonBar $script:menuSource.Tag) }
+    return 'row'
+}
 $btnMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $btnMenu.add_Opening({
     [void][CkWin]::GetAsyncKeyState(0x01); [void][CkWin]::GetAsyncKeyState(0x02)
@@ -2778,15 +2794,16 @@ $btnMenu.add_Opening({
     $miEdit.Text = L 'editText'
     $miIcon.Text = L 'setIcon'
     $miToggle.Text = L 'toggleMode'
-    # On a vertical bar the same gesture is up/down. dir +1 walks outward from the control row
-    # (BottomUp lays Controls out from the bottom), so 'up' is the +1 direction.
-    $srcBar = if ($script:menuSource -and $script:menuSource.Tag) { Get-ButtonBar $script:menuSource.Tag } else { 'row' }
-    if ($srcBar -eq 'row') {
+    # On a vertical bar the same gesture is up/down. The FIRST menu item is always the upward/
+    # leftward move so the list reads in spatial order (up above down); the click handlers
+    # flip the direction to match the label (dir +1 walks outward from the control row, and
+    # BottomUp lays Controls out from the bottom, so 'up' is the +1 direction).
+    if ((Get-MenuSourceBar) -eq 'row') {
         $miLeft.Text = L 'moveLeft'
         $miRight.Text = L 'moveRight'
     } else {
-        $miLeft.Text = L 'moveDown'
-        $miRight.Text = L 'moveUp'
+        $miLeft.Text = L 'moveUp'
+        $miRight.Text = L 'moveDown'
     }
     $miGroup.Text = L 'groupTitle'
     $miRemove.Text = L 'remove'
@@ -3090,8 +3107,10 @@ function Move-PinButton([int]$dir) {
         if ($ok) { Hide-GroupFlyout; Rebuild-Buttons }   # sync the order across all strips
     } catch { Write-CkLog "Move error: $($_.Exception.Message)" }
 }
-$miLeft.add_Click({ Move-PinButton -1 })
-$miRight.add_Click({ Move-PinButton 1 })
+# The first item is labelled Move left on the row but Move UP on a vertical bar - and 'up'
+# is the +1 direction there (see the Opening handler) - so the direction follows the label.
+$miLeft.add_Click({ Move-PinButton $(if ((Get-MenuSourceBar) -eq 'row') { -1 } else { 1 }) })
+$miRight.add_Click({ Move-PinButton $(if ((Get-MenuSourceBar) -eq 'row') { 1 } else { -1 }) })
 
 # ---------- Click behavior ----------
 function Test-CursorInDropDown($dd) {
@@ -3881,6 +3900,24 @@ function Build-SideStrip($strip, [string]$paneTitle, [bool]$isPrimary, [int]$btn
     $panel.SuspendLayout()
     $old = @($panel.Controls)
     $panel.Controls.Clear()
+    # Added FIRST so BottomUp puts the kebab at the BOTTOM of the stack - the vertical bar's
+    # equivalent of its left-edge seat on the row: the menu anchors the near end, buttons
+    # stack away from it.
+    if ($script:kebabBar -eq $strip.Side) {
+        $sg = New-Object GripHandle
+        $sg.BackColor = $script:barColor
+        $sg.DotColor = $colIcon
+        $sg.HoverFill = $colHover
+        $sg.DownFill = $colDown
+        $sg.Width = $btnSize; $sg.Height = $btnSize
+        $sg.Margin = New-Object System.Windows.Forms.Padding(0, (S(2)), 0, (S(2)))
+        $sg.ContextMenuStrip = $gripMenu
+        $sg.add_MouseUp({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $gripMenu.Show($this, $_.Location) } })
+        $sg.add_MouseEnter({ $script:hoverCtrl = $this; $script:hoverAt = Get-Date })
+        $sg.add_MouseLeave({ if ($script:hoverCtrl -eq $this) { $script:hoverCtrl = $null } })
+        $sg.add_Repaint({ Render-StripFor $this })
+        $panel.Controls.Add($sg)
+    }
     $vis = @(Get-VisibleButtons $paneTitle $isPrimary)
     $seenGroup = @{}
     foreach ($src in $vis) {
@@ -3926,23 +3963,6 @@ function Build-SideStrip($strip, [string]$paneTitle, [bool]$isPrimary, [int]$btn
         $btn.add_Repaint({ Render-StripFor $this })
         if ($b.__isGroup) { $btn.add_MouseEnter({ Show-GroupFlyout $this $false }) }
         $panel.Controls.Add($btn)
-    }
-    # Added LAST so BottomUp puts it at the OUTER end of the stack. Added first, it sat at
-    # the bottom under every button, reading as an afterthought tacked beneath the bar.
-    if ($script:kebabBar -eq $strip.Side) {
-        $sg = New-Object GripHandle
-        $sg.BackColor = $script:barColor
-        $sg.DotColor = $colIcon
-        $sg.HoverFill = $colHover
-        $sg.DownFill = $colDown
-        $sg.Width = $btnSize; $sg.Height = $btnSize
-        $sg.Margin = New-Object System.Windows.Forms.Padding(0, (S(2)), 0, (S(2)))
-        $sg.ContextMenuStrip = $gripMenu
-        $sg.add_MouseUp({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $gripMenu.Show($this, $_.Location) } })
-        $sg.add_MouseEnter({ $script:hoverCtrl = $this; $script:hoverAt = Get-Date })
-        $sg.add_MouseLeave({ if ($script:hoverCtrl -eq $this) { $script:hoverCtrl = $null } })
-        $sg.add_Repaint({ Render-StripFor $this })
-        $panel.Controls.Add($sg)
     }
     $panel.ResumeLayout()
     foreach ($o in $old) { $o.Dispose() }
