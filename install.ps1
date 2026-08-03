@@ -316,6 +316,20 @@ if (-not (Test-Path $cfgPath)) {
         if (-not $cfg.PSObject.Properties['schemaVersion']) { $cfg | Add-Member schemaVersion 1 -Force; Write-JsonAtomic $cfgPath ($cfg | ConvertTo-Json -Depth 100) }
     } catch {}
 }
+# Default per-pane Mark button (added once; a panel-local action can't be created from the pin
+# dialog, so without a seed the feature would be unreachable). A checkbox that fills for THIS
+# chat's strip only - e.g. to remember which chat an audit bundle went out from.
+try {
+    $cfg = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -eq $cfg.buttons) { $cfg | Add-Member buttons @() -Force }
+    if (-not (@($cfg.buttons) | Where-Object { $_.action -eq 'mark-toggle' })) {
+        $cfg.buttons = @($cfg.buttons) + [pscustomobject]@{
+            label = 'Mark this chat'; short = 'Mark'; icon = 'checkbox'
+            desc = 'A local marker for THIS chat only: click to fill the box (e.g. "waiting for an audit round-trip"), click again to clear. Sends nothing.'
+            action = 'mark-toggle'; bar = 'right' }
+        Write-JsonAtomic $cfgPath ($cfg | ConvertTo-Json -Depth 100)
+    }
+} catch {}
 
 # 3) Skills (core) - substitute nothing hardcoded; they read the marker file at runtime
 New-Item -ItemType Directory -Force -Path $skillsDir | Out-Null

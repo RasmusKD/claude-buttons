@@ -786,14 +786,19 @@ Check 'they are now separate blocks, not one' ((@(Get-ButtonBlocks $d).Count) -e
 # send at all. Static check: every strip collection the panel creates must appear in the lookup.
 $fnSrc = ''
 $astP = [System.Management.Automation.Language.Parser]::ParseFile($panel, [ref]$null, [ref]$null)
-$fnNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PaneForForm' }, $true)
+# The mapping logic lives in Get-PaneIndexForForm (single source of truth for sends AND the
+# per-pane mark); Get-PaneForForm is a thin index->object wrapper over it. Behavioural tests
+# for the mapping itself run in the per-pane-mark section below.
+$fnNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PaneIndexForForm' }, $true)
 if ($fnNode) { $fnSrc = $fnNode.Extent.Text }
-Check 'Get-PaneForForm was found' ($fnSrc.Length -gt 0)
+Check 'Get-PaneIndexForForm was found' ($fnSrc.Length -gt 0)
 Check 'it resolves the primary strip' ($fnSrc -match '\$frm -eq \$form')
 Check 'it resolves mirror strips' ($fnSrc -match 'script:mirrors')
 Check 'it resolves side strips (else their buttons cannot send)' ($fnSrc -match 'script:sideStrips')
 Check 'it resolves flyout buttons via their owning strip' ($fnSrc -match 'flyForm')
-Check 'the side-strip map truncates rather than rounds' (($fnSrc -split "`n" | Where-Object { $_ -match 'sideStrips' -or $_ -match '\$idx = ' } | Where-Object { $_ -match '\[int\]\(\$i / 2\)' }).Count -eq 0)
+Check 'the side-strip map truncates rather than rounds' (($fnSrc -split "`n" | Where-Object { $_ -match 'sideStrips' } | Where-Object { $_ -match '\[int\]\(\$i / 2\)' }).Count -eq 0)
+$wrapNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PaneForForm' }, $true)
+Check 'Get-PaneForForm delegates to the index mapper (no second copy of the mapping)' ($wrapNode -and $wrapNode.Extent.Text -match 'Get-PaneIndexForForm')
 
 # --- The dock cluster is the biggest tight RUN, not the first one ---
 # Measured on a live grid: controls inside a cluster sit 6-7px apart, but with the
@@ -1141,6 +1146,63 @@ try {
     Invoke-PanelAction @{ action = 'watch-toggle' }
     Check 'watch-toggle clears the marker when on' (-not (Test-Path $script:watchMarker))
 } finally { Remove-Item $gwDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+# --- Per-pane mark: a checkbox that fills for ONE chat's strip only ---
+# The form->pane-index mapping is the load-bearing piece: sends AND marks key on it, and an
+# off-by-one here silently marks (or messages) the neighbouring chat.
+$piNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PaneIndexForForm' }, $true)
+Check 'Get-PaneIndexForForm was found' ($null -ne $piNode)
+. ([scriptblock]::Create($piNode.Extent.Text))
+$a11yNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PillA11yName' }, $true)
+Check 'Get-PillA11yName was found' ($null -ne $a11yNode)
+. ([scriptblock]::Create($a11yNode.Extent.Text))
+
+$formA = New-Object object; $formM0 = New-Object object; $formM1 = New-Object object
+$sA = New-Object object; $sB = New-Object object; $sC = New-Object object
+$form = $formA
+$script:flyForm = $null
+$script:mirrors = @(@{ Form = $formM0 }, @{ Form = $formM1 })
+$script:sideStrips = @(@{ Form = $sA }, @{ Form = $sB }, @{ Form = $sC })
+Check 'primary form maps to pane 0' ((Get-PaneIndexForForm $formA) -eq 0)
+Check 'mirror strip 2 maps to pane 2' ((Get-PaneIndexForForm $formM1) -eq 2)
+Check 'side strip 1 maps to pane 0 (two per pane)' ((Get-PaneIndexForForm $sB) -eq 0)
+Check 'side strip 2 maps to pane 1' ((Get-PaneIndexForForm $sC) -eq 1)
+Check 'an unknown form maps to -1' ((Get-PaneIndexForForm (New-Object object)) -eq -1)
+Check 'a null form maps to -1' ((Get-PaneIndexForForm $null) -eq -1)
+$script:flyForm = [pscustomobject]@{ Tag = $formM0 }
+Check 'a flyout button maps to the pane of the strip that opened it' ((Get-PaneIndexForForm $script:flyForm) -eq 1)
+$script:flyForm = $null
+
+# Drive the real Invoke-PanelAction (already extracted above): click marks, click clears,
+# and a click on ANOTHER pane's strip never touches this pane's mark.
+$script:paneMarks = @{}
+function New-FakePill($frm) {
+    $b = [pscustomobject]@{ Toggled = $false; AccessibleName = '' }
+    $b | Add-Member -MemberType ScriptMethod -Name FindForm -Value ({ $frm }.GetNewClosure())
+    return $b
+}
+$markItem = @{ action = 'mark-toggle'; label = 'Mark this chat' }
+$pill0 = New-FakePill $formA
+Invoke-PanelAction $markItem $pill0
+Check 'clicking the box marks the clicked pane' ($script:paneMarks[0] -eq $true)
+Check 'the clicked box fills immediately' ($pill0.Toggled)
+Check 'the accessible name announces on' ($pill0.AccessibleName -match ', on')
+$pill2 = New-FakePill $formM1
+Invoke-PanelAction $markItem $pill2
+Check 'marking pane 2 leaves pane 0 marked' (($script:paneMarks[0] -eq $true) -and ($script:paneMarks[2] -eq $true))
+Invoke-PanelAction $markItem $pill0
+Check 'a second click clears only that pane' ((-not $script:paneMarks.ContainsKey(0)) -and ($script:paneMarks[2] -eq $true))
+Check 'the cleared box empties' (-not $pill0.Toggled)
+Check 'the accessible name announces off' ($pill0.AccessibleName -match ', off')
+$pillLost = New-FakePill (New-Object object)   # a strip that maps to no pane
+Invoke-PanelAction $markItem $pillLost
+Check 'a click with no resolvable pane marks nothing' ($script:paneMarks.Count -eq 1)
+
+# Wiring that lives inline in the tick/scan (not extractable): source-text guards.
+Check 'the 1s poll restores mark faces from paneMarks' ($srcText -match "elseif \(\[string\]\`$c\.Tag\.action -eq 'mark-toggle'\)")
+Check 'a closed pane prunes its mark (index >= pane count)' ($srcText -match '\$k -ge \$newPanes\.Count')
+Check 'the prune skips the zero-pane (modal) case' ($srcText -match '(?s)if \(\$newPanes\.Count -gt 0\) \{\s*foreach \(\$k in @\(\$script:paneMarks\.Keys\)\)')
+Check 'the checkbox icon glyph exists' ($srcText -match "'checkbox'='E739'")
 
 Write-Host ""
 if ($fails -eq 0) { Write-Host "Panel tests: $count passed" -ForegroundColor Green; exit 0 }

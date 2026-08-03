@@ -1298,6 +1298,7 @@ $script:iconMap = @{
     'wifi'='E701'; 'bluetooth'='E702'; 'cloud'='E753'; 'print'='E749'; 'game'='E7FC'
     'car'='E7EC'; 'plane'='E709'; 'building'='E731'
     # actions / state
+    'checkbox'='E739'
     'sparkle'='E794'; 'target'='E759'; 'sliders'='E78A'; 'zoom-in'='E71E'; 'zoom-out'='E71F'
     'unlock'='E785'; 'block'='E733'; 'reset'='E777'; 'logout'='E7F2'; 'alarm'='E781'
     'bell-off'='E7ED'; 'star-fill'='E735'; 'location'='E707'; 'translate'='E775'
@@ -1600,6 +1601,12 @@ $script:leftEdgeOff = $null   # right edge of the pane's left button cluster, fr
 $script:paneBottomOff = 0     # first pane's bottom edge, measured up from the window bottom
 $script:paneBounds = @()      # measured pane rects, for side-bar margins
 $script:panes = @()           # ALL chat panes (side-by-side / grid view) - one strip per pane
+# Per-pane marks (the "Mark this chat" checkbox button): pane index -> $true. Unlike a toggle,
+# whose state is one shared value mirrored onto every strip, a mark belongs to ONE pane - so
+# it lives here keyed by pane, not in toggleState keyed by button. In-memory by design: a mark
+# is a short-lived "this chat is waiting for something" flag, and keying it by grid slot means
+# persisting across a panel restart could pin the mark to whatever chat now occupies that slot.
+$script:paneMarks = @{}
 $script:uiaDirty = $false
 $script:uiaLast = Get-Date '2000-01-01'
 $script:uiaInterval = 1500    # ms between UIA passes; backs off once geometry is stable
@@ -2002,6 +2009,14 @@ function Update-UiaInfo {
         if ($script:dockDiag.Count) { Write-CkLog ("DOCK " + ($script:dockDiag -join ' ')) }
         Set-PaneSideRooms $newPanes $wr
         $script:panes = $newPanes
+        # A closed pane's mark must not survive to whatever chat next occupies that slot. Only
+        # prune against a REAL pane count: zero panes means a modal is open (composers left the
+        # tree), and wiping every mark for a settings dialog would defeat the feature.
+        if ($newPanes.Count -gt 0) {
+            foreach ($k in @($script:paneMarks.Keys)) {
+                if ($k -ge $newPanes.Count) { $script:paneMarks.Remove($k) }
+            }
+        }
         Update-GridWatch
 
         # Primary aliases = first pane (kept for the main strip and pinning)
@@ -2210,7 +2225,7 @@ function Show-GroupFlyout($btn, [bool]$pin) {
             $mb.HoverFill = $colHover
             $mb.DownFill = $colDown
             if ($m.chat) { $mb.Accent = $colAccent }
-            $mb.AccessibleName = [string]$m.label
+            $mb.AccessibleName = Get-PillA11yName $m $mb.Toggled
             $mb.ContextMenuStrip = $btnMenu
             $mb.add_MouseDown({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $script:menuSource = $this } })
             $mb.add_Click({ $b = $this; Hide-GroupFlyout; Invoke-PillClick $b })
@@ -3109,30 +3124,31 @@ function Test-TargetForeground {
 # The pane a strip is BOUND to (main strip = first pane, mirror i = pane i+1). The send path
 # must target this pane's own composer element, not re-derive one from geometry: in a tight
 # grid an adjacent pane's composer can score closer and the text lands in the wrong chat.
-function Get-PaneForForm($frm) {
-    if (-not $frm) { return $null }
+# Which pane INDEX does this strip window belong to? -1 when unknown. The single source of
+# truth for the form->pane mapping: sends resolve the pane object through it, and the per-pane
+# mark button keys its state by the index it returns.
+function Get-PaneIndexForForm($frm) {
+    if (-not $frm) { return -1 }
     # A button inside the group flyout belongs to the pane of the strip that opened it - the
     # flyout is its own window and maps to no pane, which would fall back to geometric guessing
     # and send to a neighbouring chat.
     if ($script:flyForm -and $frm -eq $script:flyForm -and $frm.Tag) { $frm = $frm.Tag }
-    if ($frm -eq $form) { if ($script:panes.Count -gt 0) { return $script:panes[0] }; return $null }
+    if ($frm -eq $form) { return 0 }
     for ($i = 0; $i -lt $script:mirrors.Count; $i++) {
-        if ($script:mirrors[$i].Form -eq $frm) {
-            $idx = $i + 1
-            if ($idx -lt $script:panes.Count) { return $script:panes[$idx] }
-            return $null
-        }
+        if ($script:mirrors[$i].Form -eq $frm) { return ($i + 1) }
     }
     # Side strips: two per pane, so strip i belongs to pane i/2. Without this a side-bar button
     # had NO bound composer, so the send fell back to guessing by geometry and the text landed
     # in the wrong box - which the paste verification then correctly refused to send.
     for ($i = 0; $i -lt $script:sideStrips.Count; $i++) {
-        if ($script:sideStrips[$i].Form -eq $frm) {
-            $idx = [int][Math]::Floor($i / 2)   # [int] ROUNDS in PowerShell
-            if ($idx -lt $script:panes.Count) { return $script:panes[$idx] }
-            return $null
-        }
+        if ($script:sideStrips[$i].Form -eq $frm) { return [int][Math]::Floor($i / 2) }   # [int] ROUNDS in PowerShell
     }
+    return -1
+}
+
+function Get-PaneForForm($frm) {
+    $idx = Get-PaneIndexForForm $frm
+    if ($idx -ge 0 -and $idx -lt $script:panes.Count) { return $script:panes[$idx] }
     return $null
 }
 
@@ -3427,6 +3443,17 @@ function Get-ToggleState($item) {
     return ($script:toggleState[(Get-ButtonKey $item)] -eq $true)
 }
 
+# Accessible name for a pill: label (never the icon glyph) + on/off for stateful buttons +
+# scope. One source of truth for every build site AND the 1s poll, which previously flipped
+# Toggled without re-announcing - so a screen reader read the state the button had at build
+# time, not the state it shows.
+function Get-PillA11yName($b, [bool]$on) {
+    $an = [string]$b.label
+    if ($b.toggle -or ([string]$b.action -eq 'mark-toggle')) { $an += $(if ($on) { ', on' } else { ', off' }) }
+    if ($b.chat -or $b.chatTitle) { $an += ', this chat' } else { $an += ', global' }
+    return $an
+}
+
 # Commit a toggle's on/off state to memory + every clone across all strips. Called immediately
 # before the actual send so an aborted click never flips state (H7 - no residual desync window).
 function Set-ToggleFace($item, [bool]$on) {
@@ -3435,6 +3462,7 @@ function Set-ToggleFace($item, [bool]$on) {
         foreach ($c in $pnl.Controls) {
             if ($c -is [PillButton] -and $c.Tag -and (Same-Button $c.Tag $item)) {
                 $c.Toggled = $on
+                $c.AccessibleName = Get-PillA11yName $c.Tag $on
             }
         }
     }
@@ -3544,8 +3572,20 @@ function Update-GridWatch {
 # A button that runs a LOCAL panel action instead of sending text to a chat. The grid-watch
 # button is the first: it arms/cancels the watcher (a marker file the stateGlob lights on), with
 # no composer involved, so it cannot be misdirected to the wrong pane and needs no agent.
-function Invoke-PanelAction($item) {
+function Invoke-PanelAction($item, $btn) {
     switch ([string]$item.action) {
+        # A per-pane checkbox: click fills it on THIS chat's strip only (e.g. "this chat has an
+        # audit bundle out for review"). Purely local - nothing is sent, no file is touched.
+        # State keys on the pane index, so every strip of the same pane (row + sides) agrees
+        # while the neighbouring panes stay unmarked.
+        'mark-toggle' {
+            $idx = Get-PaneIndexForForm $(if ($btn) { $btn.FindForm() } else { $null })
+            if ($idx -lt 0) { Write-CkLog 'Pane mark: no pane for the clicked strip'; return }
+            $on = -not ($script:paneMarks[$idx] -eq $true)
+            if ($on) { $script:paneMarks[$idx] = $true } else { $script:paneMarks.Remove($idx) }
+            if ($btn) { $btn.Toggled = $on; $btn.AccessibleName = Get-PillA11yName $item $on }   # instant feedback; the 1s poll aligns any clones
+            Write-CkLog "Pane mark: pane=$idx -> $(if ($on) { 'marked' } else { 'cleared' })"
+        }
         'watch-toggle' {
             if (Test-Path $script:watchMarker) {
                 Remove-Item $script:watchMarker -Force -ErrorAction SilentlyContinue
@@ -3571,7 +3611,7 @@ function Invoke-PillClick($btn) {
     if ($btn.Tag -and $btn.Tag.__isGroup) { Show-GroupFlyout $btn $true; return }
     # A panel-action button (e.g. the grid watcher) runs a local action and sends nothing to any
     # chat - so it bypasses the whole focus/paste/submit path below.
-    if ($btn.Tag -and $btn.Tag.action) { $script:lastClickedBtn = $btn; Invoke-PanelAction $btn.Tag; return }
+    if ($btn.Tag -and $btn.Tag.action) { $script:lastClickedBtn = $btn; Invoke-PanelAction $btn.Tag $btn; return }
     $script:lastClickedBtn = $btn     # so an abandoned send can warn next to the button clicked
     # Shift-click = insert the text but do NOT press Enter, so it can be edited or extended
     # first. Read it up front: Shift may be released during the focus + paste round-trip.
@@ -3853,7 +3893,9 @@ function Build-SideStrip($strip, [string]$paneTitle, [bool]$isPrimary, [int]$btn
         if ($b.toggle) { $btn.Toggled = (Get-ToggleState $b) }
         $btn.ForeColor = Get-ButtonFore $b $false
         if ($b.chat) { $btn.Accent = $colAccent }
-        $btn.AccessibleName = [string]$b.label
+        # Same accessible name as the row build: the side strips carry the stateful power
+        # buttons, and announcing only the label left their on/off state silent.
+        $btn.AccessibleName = Get-PillA11yName $b $btn.Toggled
         $btn.ContextMenuStrip = $btnMenu
         $btn.add_MouseDown({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $script:menuSource = $this } })
         $btn.add_Click({ Invoke-PillClick $this })
@@ -3998,11 +4040,7 @@ function Build-StripPanel($destPanel, $destGrip, [string]$paneTitle, [bool]$isPr
         $btn.HoverFill = $colHover
         $btn.DownFill = $colDown
         if ($b.chat) { $btn.Accent = $colAccent }
-        # Accessible name for screen readers: the label (not the icon glyph), + scope + toggle state.
-        $an = [string]$b.label
-        if ($b.toggle) { $an += if ($btn.Toggled) { ', on' } else { ', off' } }
-        if ($b.chat -or $b.chatTitle) { $an += ', this chat' } else { $an += ', global' }
-        $btn.AccessibleName = $an
+        $btn.AccessibleName = Get-PillA11yName $b $btn.Toggled
         $btn.ContextMenuStrip = $btnMenu
         $btn.add_MouseDown({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $script:menuSource = $this } })
         $btn.add_Click({ Invoke-PillClick $this })
@@ -4160,15 +4198,22 @@ $timer.add_Tick({
         if ($ws -gt 0) { $script:winScale = $ws }
 
         # stateGlob poll (~1 s): keep glob-backed toggle buttons truthful even when
-        # an agent, hook or another machine changes the state behind our back
+        # an agent, hook or another machine changes the state behind our back. The same pass
+        # restores per-pane mark faces: a strip rebuild recreates every button unlit, and this
+        # is the one place that periodically walks every strip's controls anyway.
         if (((Get-Date) - $script:stateGlobLast).TotalMilliseconds -ge 1000) {
             $script:stateGlobLast = Get-Date
             $allPanels = @($panel) + @($script:mirrors | ForEach-Object { $_.Panel }) + @($script:sideStrips | ForEach-Object { $_.Panel })
             foreach ($pnl in $allPanels) {
                 foreach ($c in $pnl.Controls) {
-                    if ($c -is [PillButton] -and $c.Tag -and $c.Tag.toggle -and $c.Tag.stateGlob) {
+                    if ($c -isnot [PillButton] -or -not $c.Tag) { continue }
+                    if ($c.Tag.toggle -and $c.Tag.stateGlob) {
                         $truth = Get-ToggleState $c.Tag
-                        if ($c.Toggled -ne $truth) { $c.Toggled = $truth }
+                        if ($c.Toggled -ne $truth) { $c.Toggled = $truth; $c.AccessibleName = Get-PillA11yName $c.Tag $truth }
+                    } elseif ([string]$c.Tag.action -eq 'mark-toggle') {
+                        $idx = Get-PaneIndexForForm $c.FindForm()
+                        $truth = ($idx -ge 0 -and $script:paneMarks[$idx] -eq $true)
+                        if ($c.Toggled -ne $truth) { $c.Toggled = $truth; $c.AccessibleName = Get-PillA11yName $c.Tag $truth }
                     }
                 }
             }

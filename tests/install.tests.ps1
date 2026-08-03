@@ -269,6 +269,20 @@ $btnDef = [regex]::Match($btnBlock, "label\s*=\s*'Shutdown on done'.*?submit\s*=
 Check 'the default shutdown button definition was found' ($btnDef.Length -gt 0)
 Check 'the default shutdown button has no two-click confirm' ($btnDef -notmatch 'confirm\s*=\s*\$true')
 
+# The per-pane Mark button must be seeded by the installer: panel-local action buttons cannot
+# be created from the pin dialog, so without the seed the feature is unreachable. It must be
+# added ONCE (guarded), unconditionally (not inside the optional shutdown branch), and send
+# nothing (action only - no text/submit).
+$markDef = [regex]::Match($btnBlock, "if \(-not \(@\(\`$cfg\.buttons\) \| Where-Object \{ \`$_\.action -eq 'mark-toggle' \}\)\).*?bar = 'right' \}", 'Singleline').Value
+Check 'the Mark button seed exists and is added-once guarded' ($markDef.Length -gt 0)
+Check 'the Mark button is a pure panel action (never sends)' (($markDef -notmatch 'text\s*=') -and ($markDef -notmatch 'submit\s*='))
+# Everything from the optional-shutdown section onward is opt-in; the Mark seed must appear
+# BEFORE it. No fallback: if the section anchor vanishes, this must fail, not silently pass.
+$shutdownSectionAt = $btnBlock.IndexOf('OPTIONAL shutdown feature')
+$markSeedAt = $btnBlock.IndexOf("mark-toggle")
+Check 'the optional-shutdown section anchor exists' ($shutdownSectionAt -ge 0)
+Check 'the Mark seed is not gated behind the shutdown feature' (($markSeedAt -ge 0) -and ($markSeedAt -lt $shutdownSectionAt))
+
 # Granting twice must not duplicate: -Update re-runs this on every upgrade.
 $before = @($granted.permissions.allow).Count
 Grant-ShutdownAllowRules $granted 'C:/Users/test/.claude/hooks/shutdown-on-done.mjs'

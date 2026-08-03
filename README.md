@@ -81,12 +81,13 @@ confirm to arm, one click to cancel. It is never installed silently.
 - **Shift-click** to insert the text **without** sending, so you can extend or edit the prompt before pressing Enter yourself. (Only meaningful on buttons that would otherwise send — per-chat buttons never auto-send anyway. Toggles do not flip on a Shift-click: the command is parked, not executed.)
 - **Hover a button** for a themed tooltip showing its command, scope and behavior — add your own explanation with a `"desc"` field in `buttons.json`.
 - **Right-click a button** → rename, edit the text/prompt, set an icon, switch on/off (toggle) mode, reorder (*Move left / Move right*), or remove.
+- **Mark this chat** (the checkbox button, seeded by the installer): a purely local per-chat marker — click to fill the box on *that* chat's strip, click again to clear. Nothing is sent and no file is touched; use it to remember which chat is waiting on something (an audit round-trip, a review, a long job). Marks are per grid pane and last until the panel closes or the pane closes.
 - The **⋮ menu** also holds **Language** (English / Dansk), a **Hover tooltips** on/off switch, and **Close panel**. The strip docks itself to the composer — there is no manual placement to fiddle with.
 
 ### Icons
 
 Right-click a button → *Set icon...* to browse them in a visual picker, or type a name directly.
-The 134 built-in names (all from Windows' Segoe Fluent Icons font — no downloads):
+The 135 built-in names (all from Windows' Segoe Fluent Icons font — no downloads):
 
 - **Core**: `mic, power, play, pause, stop, refresh, check, x, trash, settings, search, save, code, bug, star, pin, send, bell, clock, sun, moon, zap, home, folder, camera, edit, plus, download, upload, user, mail, globe, lock, heart, flag, calendar, phone, broom, terminal, shield, copy, link`
 - **Help / status**: `help, question, info, warning, error`
@@ -97,7 +98,7 @@ The 134 built-in names (all from Windows' Segoe Fluent Icons font — no downloa
 - **Media / image**: `image, video, crop, palette, brush, contrast, volume, mute, headphones, record`
 - **People / social**: `people, contacts, badge, smile, chat, share, megaphone, gift, cart`
 - **Devices**: `monitor, laptop, mobile, mouse, devices, wifi, bluetooth, cloud, print, game, car, plane, building`
-- **Misc**: `sparkle, target, sliders, zoom-in, zoom-out, unlock, block, reset, logout, alarm, bell-off, star-fill, location, translate, accessibility, education, click`
+- **Misc**: `sparkle, target, sliders, zoom-in, zoom-out, unlock, block, reset, logout, alarm, bell-off, star-fill, location, translate, accessibility, education, click, checkbox`
 
 You can also give any 4-digit hex codepoint from the Segoe Fluent Icons font. Icon buttons show
 their label and command in the tooltip.
@@ -179,6 +180,7 @@ Per-button fields:
 | `toggle` | `true` = on/off button (lit while on). |
 | `textOn` / `textOff` | Text sent when switching on / off (`textOn` defaults to `text`; omit `textOff` for silent off). |
 | `stateGlob` | Glob (env vars expanded); the toggle is lit iff a matching file exists — truthful state from the filesystem. |
+| `action` | Panel-local action instead of sending text: `watch-toggle` (the grid watcher) or `mark-toggle` (the per-pane mark). Action buttons never type into the chat. |
 | `chat` | Session id this button is scoped to (per-chat). |
 | `chatTitle` | The displayed chat title this button binds to (preferred per-chat match). |
 | `chatLabel` | Human description shown in the tooltip for a per-chat button. |
