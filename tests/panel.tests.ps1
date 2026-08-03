@@ -1257,6 +1257,49 @@ Check 'a closed pane prunes its mark (index >= pane count)' ($srcText -match '\$
 Check 'the prune skips the zero-pane (modal) case' ($srcText -match '(?s)if \(\$newPanes\.Count -gt 0\) \{\s*foreach \(\$k in @\(\$script:paneMarks\.Keys\)\)')
 Check 'the checkbox icon glyph exists' ($srcText -match "'checkbox'='E739'")
 
+# --- -Quit and release-on-gone (the "Claude update says in use" report) ---
+# The panel must be stoppable in one click without hunting anonymous PowerShell rows in Task
+# Manager, and must hold NOTHING of Claude's process (UIA elements, event hooks) while Claude
+# is closed - that is exactly when its updater swaps files.
+Check 'Quit.cmd exists for one-click shutdown' (Test-Path (Join-Path $repo 'Quit.cmd'))
+Check 'the installer ships Quit.cmd' ((Get-Content (Join-Path $repo 'install.ps1') -Raw) -match 'Quit\.cmd')
+$quitHandlerLine = ($src | Select-String -Pattern 'Quit signal sent' | Select-Object -First 1).LineNumber
+$cleanupLine = ($src | Select-String -Pattern 'crash between signal and consume' | Select-Object -First 1).LineNumber
+Check 'the -Quit CLI handler exists' ($quitHandlerLine -gt 0)
+Check 'startup clears a stale marker only on the real launch path (after the CLI modes)' (
+    ($cleanupLine -gt 0) -and ($cleanupLine -gt $quitHandlerLine))
+$quitTickLine = ($src | Select-String -Pattern 'Quit signal received' | Select-Object -First 1).LineNumber
+Check 'the tick consumes the quit signal BEFORE the show gate (works while hidden)' (
+    ($quitTickLine -gt 0) -and ($showLine -gt 0) -and ($quitTickLine -lt $showLine))
+Check 'target loss releases panes, composer flags and hooks in one block' (
+    $srcText -match '(?s)elseif \(\$script:claudeUp\) \{[\s\S]{0,900}?\$script:panes = @\(\)[\s\S]{0,900}?\[WinHook\]::Stop\(\)')
+Check 'the release collects promptly so the COM proxies actually drop' (
+    $srcText -match '(?s)\[WinHook\]::Stop\(\)\s*[\r\n]+\s*\[GC\]::Collect\(\)')
+Check 'WinHook.Start is idempotent (a re-found target must not stack hooks)' (
+    $srcText -match 'if \(_hFg != IntPtr\.Zero \|\| _hObj != IntPtr\.Zero\) return;')
+Check 'WinHook.Stop zeroes the handles so Start can re-arm' (
+    $srcText -match '_hFg = IntPtr\.Zero; _hObj = IntPtr\.Zero;')
+Check 'rediscovery re-arms the hooks' ($srcText -match '(?s)FindTarget\(\$targetTitle, \$targetProcess\)[\s\S]{0,600}?\[WinHook\]::Start\(\)')
+# Functional: a stale marker must not kill the next launch (startup consumes it), and -Quit
+# with a live instance writes the marker. Hold the mutex ourselves so the -Quit test is
+# deterministic whether or not a real panel is running on this machine.
+$qDir = Join-Path ([IO.Path]::GetTempPath()) ("cb-quit-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $qDir | Out-Null
+Copy-Item $panel (Join-Path $qDir 'claude-buttons.ps1') -Force
+Copy-Item $defCfg (Join-Path $qDir 'buttons.default.json') -Force
+Copy-Item $defCfg (Join-Path $qDir 'buttons.json') -Force
+[IO.File]::WriteAllText((Join-Path $qDir 'quit.signal'), 'stale')
+$qOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $qDir 'claude-buttons.ps1') -SmokeTest 2>&1
+Check 'a stale quit marker does not break a launch (SMOKE-OK)' (($qOut -join ' ') -match 'SMOKE-OK')
+Check 'the stale marker is consumed at startup' (-not (Test-Path (Join-Path $qDir 'quit.signal')))
+$qm = New-Object System.Threading.Mutex($false, 'Local\ClaudeButtonsPanel')
+try {
+    $qOut2 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $qDir 'claude-buttons.ps1') -Quit 2>&1
+    Check '-Quit with a live instance reports the signal' (($qOut2 -join ' ') -match 'Quit signal sent')
+    Check '-Quit wrote the marker for the running panel to consume' (Test-Path (Join-Path $qDir 'quit.signal'))
+} finally { $qm.Dispose() }
+Remove-Item $qDir -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
 if ($fails -eq 0) { Write-Host "Panel tests: $count passed" -ForegroundColor Green; exit 0 }
 else { Write-Host "Panel tests: $fails of $count FAILED" -ForegroundColor Red; exit 1 }

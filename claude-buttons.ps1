@@ -4,6 +4,7 @@
 # that was never saved.
 param(
     [switch]$SmokeTest,
+    [switch]$Quit,
     [Parameter(DontShow)][string]$PasteProbe = $null,
     [string]$AddButton,
     [string]$RemoveButton
@@ -728,13 +729,18 @@ public static class WinHook {
         }
         _dirty = true;
     }
+    // Start/Stop are idempotent: the panel re-Starts on every target rediscovery and Stops
+    // whenever Claude is gone, so a double call must never stack a second pair of hooks.
     public static void Start() {
+        if (_hFg != IntPtr.Zero || _hObj != IntPtr.Zero) return;
         _cb = OnEvent;
         _hFg = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, _cb, 0, 0, OUTOFCONTEXT | SKIPOWNPROCESS);
         _hObj = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_NAMECHANGE, IntPtr.Zero, _cb, 0, 0, OUTOFCONTEXT | SKIPOWNPROCESS);
+        _dirty = true;   // a fresh hook set knows nothing - force a full pass
     }
     public static void Stop() {
         try { if (_hFg != IntPtr.Zero) UnhookWinEvent(_hFg); if (_hObj != IntPtr.Zero) UnhookWinEvent(_hObj); } catch {}
+        _hFg = IntPtr.Zero; _hObj = IntPtr.Zero;
     }
     // Returns true (and clears) if an event arrived since the last call.
     public static bool Consume() { bool d = _dirty; _dirty = false; return d; }
@@ -1189,6 +1195,24 @@ function Same-Button($a, $b) {
 # skill's read->write window was silently destroyed. Routing the skills through the SAME
 # merge protocol closes that, and costs them nothing: one call instead of three file steps.
 # Exits before any UI is built, so this is safe to run headless while the panel is running.
+# -Quit: ask the RUNNING panel to exit, without hunting anonymous "Windows PowerShell" rows in
+# Task Manager (double-click Quit.cmd). A marker file is the signal - the panel's tick consumes
+# it within a second even while the strips are hidden (Claude closed) - and it is only written
+# when an instance actually holds the single-instance mutex, so a stray -Quit can't leave a
+# marker that kills the NEXT launch (startup clears stale markers regardless, belt and braces).
+if ($Quit) {
+    $running = $false
+    try {
+        $m = $null
+        if ([System.Threading.Mutex]::TryOpenExisting('Local\ClaudeButtonsPanel', [ref]$m)) { $running = $true; $m.Dispose() }
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] { $running = $false }
+    catch { $running = $true }   # access denied etc. - the mutex exists, so an instance does
+    if (-not $running) { Write-Output 'No running panel.'; exit 0 }
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'quit.signal'), (Get-Date -Format o))
+    Write-Output 'Quit signal sent - the panel exits within a second.'
+    exit 0
+}
+
 # Bind on PRESENCE, not truthiness: `-AddButton ""` used to be falsy, fall through, and launch
 # the whole panel UI - so a caller whose payload path came out empty got a second panel instance
 # and exit 0, i.e. "success" for a button that was never written.
@@ -1261,6 +1285,10 @@ if ($PSBoundParameters.ContainsKey('AddButton') -or $PSBoundParameters.ContainsK
     Write-Output "REMOVED: 1"
     exit 0
 }
+
+# Real panel launch from here (every CLI mode has exited above). A leftover quit marker - a
+# crash between signal and consume - must not kill THIS launch; only the tick may consume one.
+try { Remove-Item (Join-Path $PSScriptRoot 'quit.signal') -Force -ErrorAction SilentlyContinue } catch {}
 
 # ---------- Text helpers ----------
 $script:btnFont = New-Object System.Drawing.Font('Segoe UI', 11)
@@ -4145,6 +4173,8 @@ $script:target = [IntPtr]::Zero
 $script:targetPid = [uint32]0
 $script:myPid = [uint32](Get-Process -Id $PID).Id
 $script:autoMove = $false
+$script:claudeUp = $false          # tracks found->gone transitions so refs release exactly once
+$script:quitCheckLast = Get-Date   # throttle for the quit-signal file probe
 
 # Is a pane's spot on Claude actually visible (vs covered by another app)? The strips are
 # TopMost so they never flash on focus change; this is what stops them bleeding through a
@@ -4166,6 +4196,19 @@ $timer.Interval = 50
 $timer.add_Tick({
     if ($script:sending) { return }   # don't touch the UI mid-send
     try {
+        # -Quit signal (Quit.cmd): checked BEFORE the show gate so the panel can be shut down
+        # while Claude is closed and the strips are hidden - exactly when Task Manager is the
+        # only other way to find it. Throttled: a Test-Path per second, not per 50ms tick.
+        if (((Get-Date) - $script:quitCheckLast).TotalMilliseconds -ge 1000) {
+            $script:quitCheckLast = Get-Date
+            $qs = Join-Path $PSScriptRoot 'quit.signal'
+            if (Test-Path $qs) {
+                try { Remove-Item $qs -Force -ErrorAction SilentlyContinue } catch {}
+                Write-CkLog 'Quit signal received - exiting'
+                $form.Close()
+                return
+            }
+        }
         # Close open menus when the mouse leaves them (the window never takes focus,
         # so Windows' own click-outside dismissal is unreliable here)
         $menusOpen = @(@($gripMenu, $btnMenu) | Where-Object { $_.Visible })
@@ -4213,7 +4256,21 @@ $timer.add_Tick({
                 [void][CkWin]::GetWindowThreadProcessId($script:target, [ref]$p)
                 $script:targetPid = $p
                 [WinHook]::TargetPid = $p   # scope object-event noise to Claude's process
+                [WinHook]::Start()          # re-arm if released while Claude was gone (idempotent)
                 [WinHook]::Touch()          # a freshly (re)found window needs a full pass
+                $script:claudeUp = $true
+            } elseif ($script:claudeUp) {
+                # Claude's window is GONE (quit, or its updater is swapping files). Release
+                # everything that touches its process - the cached UIA elements and the event
+                # hooks - and collect promptly so the COM proxies actually drop, not at some
+                # later GC. The panel must hold NOTHING of Claude's while an update runs.
+                $script:claudeUp = $false
+                $script:panes = @()
+                $script:composerSeen = $false
+                $script:composerLost = $false
+                [WinHook]::Stop()
+                [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                Write-CkLog 'Claude gone - released UIA references and event hooks'
             }
         }
         # Show whenever Claude is on-screen (not minimized), even if it is not the active window -

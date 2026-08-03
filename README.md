@@ -192,6 +192,7 @@ Per-button fields:
 - **App not in English?** Accessibility names like `Prompt` and `… pane` may be localized — set `uiaComposerName` and `uiaPaneMatch` to the localized names in `buttons.json`.
 - **`/pin` says unknown command, or does nothing** → restart the Claude app once so the skill loads; the skill writes to the file named in `%USERPROFILE%\.claude\claude-buttons-path.txt`.
 - **Nothing appears** → the strip only shows when the Claude window is the foreground window.
+- **Need to stop the panel (e.g. a Claude update says something is in use)?** → double-click **`Quit.cmd`** in the install folder (or run `claude-buttons.ps1 -Quit`); the panel exits within a second, even while Claude is closed and the strips are hidden. No Task Manager digging — the panel runs as an anonymous "Windows PowerShell" process that is deliberately hard to spot there. The panel holds no files in Claude's folder and releases every accessibility reference and event hook within a second of the Claude window disappearing, so it should never block an update by itself — but if an updater complains, `Quit.cmd` removes it from suspicion in one click, and the ⋮ menu → *Close panel* does the same while the strip is visible.
 - **Keyboard / screen-reader users:** the strip is a mouse-driven overlay that never takes focus. Use the `/pin` and `/unpin` skills (and hand-editing `buttons.json`) as the keyboard/AT path.
 
 ## Accessibility

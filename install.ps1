@@ -305,6 +305,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # 1) Program files (always overwrite)
 Copy-Item (Join-Path $src $panelName) (Join-Path $InstallDir $panelName) -Force
 Copy-Item (Join-Path $src 'Launch.vbs') (Join-Path $InstallDir 'Launch.vbs') -Force
+Copy-Item (Join-Path $src 'Quit.cmd') (Join-Path $InstallDir 'Quit.cmd') -Force
 
 # 2) buttons.json - only create if missing (never wipe the user's buttons); migrate in place otherwise
 $cfgPath = Join-Path $InstallDir 'buttons.json'
