@@ -1298,7 +1298,7 @@ $script:iconMap = @{
     'wifi'='E701'; 'bluetooth'='E702'; 'cloud'='E753'; 'print'='E749'; 'game'='E7FC'
     'car'='E7EC'; 'plane'='E709'; 'building'='E731'
     # actions / state
-    'checkbox'='E739'
+    'checkbox'='E739'; 'checkbox-filled'='E73B'
     'sparkle'='E794'; 'target'='E759'; 'sliders'='E78A'; 'zoom-in'='E71E'; 'zoom-out'='E71F'
     'unlock'='E785'; 'block'='E733'; 'reset'='E777'; 'logout'='E7F2'; 'alarm'='E781'
     'bell-off'='E7ED'; 'star-fill'='E735'; 'location'='E707'; 'translate'='E775'
@@ -3454,6 +3454,28 @@ function Get-PillA11yName($b, [bool]$on) {
     return $an
 }
 
+# The mark button's face: a checkbox that visually FILLS when marked - a solid blue square
+# glyph replaces the outline box - rather than the toggle pill's amber wash + dot. The state
+# cue is fill vs outline (a shape change, not colour alone), and the blue clears WCAG 1.4.11
+# against the bar (asserted in the tests). Off restores the configured face via Set-PillFace,
+# so a custom icon or label on the button survives a mark/unmark cycle.
+function Set-MarkFace($c, [bool]$on) {
+    $g = Get-IconGlyph 'checkbox-filled'
+    if ($on -and $g) {
+        $c.Font = $script:iconFont
+        $c.Text = $g
+        $c.Width = $pillH
+        $c.ForeColor = $script:ckPalette['blue']
+    } else {
+        # Off - or a machine without the Segoe icon fonts, where a glyph mark would be
+        # invisible: fall back to the toggle wash so the state is never silently lost.
+        if (-not $g) { $c.Toggled = $on }
+        Set-PillFace $c
+        $c.ForeColor = Get-ButtonFore $c.Tag $false
+    }
+    $c.AccessibleName = Get-PillA11yName $c.Tag $on
+}
+
 # Commit a toggle's on/off state to memory + every clone across all strips. Called immediately
 # before the actual send so an aborted click never flips state (H7 - no residual desync window).
 function Set-ToggleFace($item, [bool]$on) {
@@ -3583,7 +3605,7 @@ function Invoke-PanelAction($item, $btn) {
             if ($idx -lt 0) { Write-CkLog 'Pane mark: no pane for the clicked strip'; return }
             $on = -not ($script:paneMarks[$idx] -eq $true)
             if ($on) { $script:paneMarks[$idx] = $true } else { $script:paneMarks.Remove($idx) }
-            if ($btn) { $btn.Toggled = $on; $btn.AccessibleName = Get-PillA11yName $item $on }   # instant feedback; the 1s poll aligns any clones
+            if ($btn) { Set-MarkFace $btn $on }   # instant feedback; the 1s poll aligns any clones
             Write-CkLog "Pane mark: pane=$idx -> $(if ($on) { 'marked' } else { 'cleared' })"
         }
         'watch-toggle' {
@@ -4213,7 +4235,12 @@ $timer.add_Tick({
                     } elseif ([string]$c.Tag.action -eq 'mark-toggle') {
                         $idx = Get-PaneIndexForForm $c.FindForm()
                         $truth = ($idx -ge 0 -and $script:paneMarks[$idx] -eq $true)
-                        if ($c.Toggled -ne $truth) { $c.Toggled = $truth; $c.AccessibleName = Get-PillA11yName $c.Tag $truth }
+                        # The filled-square glyph IS the on-state; compare against it so the
+                        # face is only rewritten (and repainted) when the state actually moved.
+                        # (No icon fonts -> the fallback wash carries the state in Toggled.)
+                        $onGlyph = Get-IconGlyph 'checkbox-filled'
+                        $isOn = if ($onGlyph) { $c.Text -eq $onGlyph } else { [bool]$c.Toggled }
+                        if ($isOn -ne $truth) { Set-MarkFace $c $truth }
                     }
                 }
             }

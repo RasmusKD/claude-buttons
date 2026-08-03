@@ -364,6 +364,14 @@ $togFill = ArgbFrom 'ToggleFill\s*=\s*Color\.FromArgb\((\d+),\s*(\d+),\s*(\d+)\)
 $togFore = ArgbFrom 'ToggleFore\s*=\s*Color\.FromArgb\((\d+),\s*(\d+),\s*(\d+)\)'
 $bar     = ArgbFrom '\$colBar\s*=\s*\[System\.Drawing\.Color\]::FromArgb\((\d+),\s*(\d+),\s*(\d+)\)'
 Check 'toggle colours are parseable from source' ($togFill -and $togFore -and $bar)
+# The mark button's filled state is the palette blue drawn directly on the bar; it is a state
+# indicator, so it carries the same 3:1 non-text bar as the toggle cues.
+$palBlue = ArgbFrom 'blue\s*=\s*\[System\.Drawing\.Color\]::FromArgb\((\d+),\s*(\d+),\s*(\d+)\)'
+Check 'palette blue is parseable from source' ($null -ne $palBlue)
+if ($palBlue -and $bar) {
+    $blueCue = Ratio $palBlue $bar
+    Check ("mark fill (palette blue) vs bar: {0:N2}:1 >= 3.0 (WCAG 1.4.11)" -f $blueCue) ($blueCue -ge 3.0)
+}
 if ($togFill -and $togFore -and $bar) {
     $fg = Ratio $togFore $togFill
     $cue = Ratio $togFill $bar
@@ -1174,10 +1182,12 @@ Check 'a flyout button maps to the pane of the strip that opened it' ((Get-PaneI
 $script:flyForm = $null
 
 # Drive the real Invoke-PanelAction (already extracted above): click marks, click clears,
-# and a click on ANOTHER pane's strip never touches this pane's mark.
+# and a click on ANOTHER pane's strip never touches this pane's mark. Set-MarkFace is stubbed
+# here (it is UI plumbing); its real face logic is tested on its own just below.
 $script:paneMarks = @{}
+function Set-MarkFace($c, [bool]$on) { $c.On = $on }
 function New-FakePill($frm) {
-    $b = [pscustomobject]@{ Toggled = $false; AccessibleName = '' }
+    $b = [pscustomobject]@{ On = $false }
     $b | Add-Member -MemberType ScriptMethod -Name FindForm -Value ({ $frm }.GetNewClosure())
     return $b
 }
@@ -1185,18 +1195,56 @@ $markItem = @{ action = 'mark-toggle'; label = 'Mark this chat' }
 $pill0 = New-FakePill $formA
 Invoke-PanelAction $markItem $pill0
 Check 'clicking the box marks the clicked pane' ($script:paneMarks[0] -eq $true)
-Check 'the clicked box fills immediately' ($pill0.Toggled)
-Check 'the accessible name announces on' ($pill0.AccessibleName -match ', on')
+Check 'the clicked box is re-faced as filled' ($pill0.On)
 $pill2 = New-FakePill $formM1
 Invoke-PanelAction $markItem $pill2
 Check 'marking pane 2 leaves pane 0 marked' (($script:paneMarks[0] -eq $true) -and ($script:paneMarks[2] -eq $true))
 Invoke-PanelAction $markItem $pill0
 Check 'a second click clears only that pane' ((-not $script:paneMarks.ContainsKey(0)) -and ($script:paneMarks[2] -eq $true))
-Check 'the cleared box empties' (-not $pill0.Toggled)
-Check 'the accessible name announces off' ($pill0.AccessibleName -match ', off')
+Check 'the cleared box is re-faced as empty' (-not $pill0.On)
 $pillLost = New-FakePill (New-Object object)   # a strip that maps to no pane
 Invoke-PanelAction $markItem $pillLost
 Check 'a click with no resolvable pane marks nothing' ($script:paneMarks.Count -eq 1)
+Check 'a click with no resolvable pane never re-faces the button' (-not $pillLost.On)
+
+# The REAL Set-MarkFace: marked = the solid filled-square glyph in blue (the box visibly
+# fills); unmarked = the configured face restored via Set-PillFace. Dependencies that touch
+# live UI state are stubbed; the glyph resolution is the real Get-IconGlyph.
+$igNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-IconGlyph' }, $true)
+Check 'Get-IconGlyph was found' ($null -ne $igNode)
+. ([scriptblock]::Create($igNode.Extent.Text))
+$mfNode = $astP.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-MarkFace' }, $true)
+Check 'Set-MarkFace was found' ($null -ne $mfNode)
+. ([scriptblock]::Create($mfNode.Extent.Text))   # replaces the stub above
+Add-Type -AssemblyName System.Drawing   # the test host has no WinForms preloaded
+$script:iconFont = New-Object object
+$script:iconMap = @{ 'checkbox' = 'E739'; 'checkbox-filled' = 'E73B' }
+$script:ckPalette = @{ blue = [System.Drawing.Color]::FromArgb(107, 166, 232) }
+$pillH = 24
+function Set-PillFace($btn) { $btn.Text = 'base-face' }
+function Get-ButtonFore($b, [bool]$isOn) { return [System.Drawing.Color]::FromArgb(190, 190, 190) }
+function New-FakeMarkPill {
+    [pscustomobject]@{ Font = $null; Text = ''; Width = 0; ForeColor = [System.Drawing.Color]::Empty
+                       Toggled = $false; AccessibleName = ''
+                       Tag = @{ label = 'Mark this chat'; action = 'mark-toggle'; icon = 'checkbox' } }
+}
+$mp = New-FakeMarkPill
+Set-MarkFace $mp $true
+Check 'marked: the face is the solid filled-square glyph' ($mp.Text -eq [string][char]0xE73B)
+Check 'marked: the square is the palette blue' (($mp.ForeColor.R -eq 107) -and ($mp.ForeColor.G -eq 166) -and ($mp.ForeColor.B -eq 232))
+Check 'marked: it does NOT use the toggle wash' (-not $mp.Toggled)
+Check 'marked: announces on' ($mp.AccessibleName -match ', on')
+Set-MarkFace $mp $false
+Check 'unmarked: the configured face is restored via Set-PillFace' ($mp.Text -eq 'base-face')
+Check 'unmarked: announces off' ($mp.AccessibleName -match ', off')
+# No Segoe icon fonts (Get-IconGlyph returns null): the mark must fall back to the toggle
+# wash rather than becoming an invisible state.
+$script:iconFont = $null
+$mp2 = New-FakeMarkPill
+Set-MarkFace $mp2 $true
+Check 'no icon fonts: the mark falls back to the toggle wash' ($mp2.Toggled)
+Set-MarkFace $mp2 $false
+Check 'no icon fonts: unmarking clears the wash' (-not $mp2.Toggled)
 
 # Wiring that lives inline in the tick/scan (not extractable): source-text guards.
 Check 'the 1s poll restores mark faces from paneMarks' ($srcText -match "elseif \(\[string\]\`$c\.Tag\.action -eq 'mark-toggle'\)")
