@@ -1285,7 +1285,12 @@ Check 'the tick consumes the quit signal BEFORE the show gate (works while hidde
 Check 'target loss releases panes, composer flags and hooks in one block' (
     $srcText -match '(?s)elseif \(\$script:claudeUp\) \{[\s\S]{0,900}?\$script:panes = @\(\)[\s\S]{0,900}?\[WinHook\]::Stop\(\)')
 Check 'the release collects promptly so the COM proxies actually drop' (
-    $srcText -match '(?s)\[WinHook\]::Stop\(\)\s*[\r\n]+\s*\[GC\]::Collect\(\)')
+    $srcText -match '(?s)\[WinHook\]::Stop\(\)[\s\S]{0,600}?\[GC\]::Collect\(\)')
+# WaitForPendingFinalizers on the STA thread is a guaranteed deadlock: the UIA proxies'
+# finalizers marshal their COM releases to the very thread doing the waiting. It froze the
+# panel for hours (strips visible, everything dead) until a PC restart. Banned outright.
+Check 'WaitForPendingFinalizers appears nowhere (STA deadlock)' (
+    $srcText -notmatch 'WaitForPendingFinalizers')
 Check 'WinHook.Start is idempotent (a re-found target must not stack hooks)' (
     $srcText -match 'if \(_hFg != IntPtr\.Zero \|\| _hObj != IntPtr\.Zero\) return;')
 Check 'WinHook.Stop zeroes the handles so Start can re-arm' (

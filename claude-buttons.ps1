@@ -4291,7 +4291,13 @@ $timer.add_Tick({
                 $script:composerSeen = $false
                 $script:composerLost = $false
                 [WinHook]::Stop()
-                [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                # Collect only - NEVER block waiting on the finalizer queue here: the UIA
+                # proxies' finalizers must marshal their COM releases to THIS (STA) thread, so
+                # waiting for them on it is a guaranteed deadlock - the panel froze for hours
+                # exactly this way, strips visible but dead, until the PC was restarted.
+                # Collect queues the finalizers; the message loop keeps pumping; the releases
+                # land within moments. A test bans the blocking call by name.
+                [GC]::Collect()
                 Write-CkLog 'Claude gone - released UIA references and event hooks'
             }
         }
