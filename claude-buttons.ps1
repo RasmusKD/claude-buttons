@@ -964,6 +964,8 @@ $script:strings = @{
         tipGroup = 'Group of {0}'; tipGroupHint = 'Hover to open - right-click: rename / set icon'
         tipShift = 'Shift-click: insert without sending'
         sendBlank = 'Not sent: this button has no text to send. Check its text in buttons.json.'
+        sendNotFront = 'Not sent: Claude never became the active window. Click the chat once, then the button.'
+        sendNoFocus = 'Not sent: focus never landed in this chat''s message box.'
         sendNoClipboard = 'Not sent: the clipboard was unavailable, so nothing was pasted. The message box was not changed.'
         sendMismatch = 'Not sent: the paste did not land as expected. Check the message box before sending - something else may be in it.'
         sendUnverified = 'Not sent: could not read the message box to confirm the paste. Nothing was submitted.'
@@ -1000,6 +1002,8 @@ $script:strings = @{
         tipGroup = 'Gruppe med {0}'; tipGroupHint = 'Hold musen over for at åbne - højreklik: omdøb / vælg ikon'
         tipShift = 'Shift-klik: indsæt uden at sende'
         sendBlank = 'Ikke sendt: denne knap har ingen tekst at sende. Tjek dens tekst i buttons.json.'
+        sendNotFront = 'Ikke sendt: Claude blev aldrig det aktive vindue. Klik i chatten én gang, og så på knappen.'
+        sendNoFocus = 'Ikke sendt: fokus landede aldrig i denne chats beskedfelt.'
         sendNoClipboard = 'Ikke sendt: udklipsholderen var utilgængelig, så intet blev indsat. Beskedfeltet blev ikke ændret.'
         sendMismatch = 'Ikke sendt: indsættelsen landede ikke som forventet. Tjek beskedfeltet før du sender - der kan stå noget andet i det.'
         sendUnverified = 'Ikke sendt: kunne ikke læse beskedfeltet for at bekræfte indsættelsen. Intet blev afsendt.'
@@ -3736,9 +3740,18 @@ function Invoke-PillClick($btn) {
             }
             if (-not (Wait-ComposerFocus $composerEl)) {
                 Write-CkLog 'Send aborted: focus never landed in this pane composer'
+                Show-SendWarning (L 'sendNoFocus')
                 return
             }
-            if (-not (Test-TargetForeground)) { return }   # focus didn't reach Claude - don't type elsewhere
+            # Focus didn't reach Claude - don't type elsewhere. Log WHERE focus actually is:
+            # a silent return here left "button does nothing" completely undiagnosable.
+            if (-not (Test-TargetForeground)) {
+                $fg = [CkWin]::GetForegroundWindow()
+                $fgPid = [uint32]0; [void][CkWin]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+                Write-CkLog "Send aborted: Claude not foreground after focus (fg=0x$($fg.ToString('X')) fgPid=$fgPid target=0x$($script:target.ToString('X')) targetPid=$($script:targetPid))"
+                Show-SendWarning (L 'sendNotFront')
+                return
+            }
             # Toggle with nothing to send (off, no textOff): flip only, we're foreground.
             if ($isToggle -and [string]::IsNullOrEmpty($textToSend)) { Set-ToggleFace $item $newOn; return }
 
@@ -3748,7 +3761,11 @@ function Invoke-PillClick($btn) {
             # is unavailable the send is ABANDONED and the user is told (see the top of file).
             # Re-check foreground BEFORE touching the clipboard so an aborted send never leaves
             # it clobbered, and restore it in finally so it survives an exception.
-            if (-not (Test-TargetForeground)) { return }
+            if (-not (Test-TargetForeground)) {
+                Write-CkLog 'Send aborted: foreground moved off Claude between focus and paste'
+                Show-SendWarning (L 'sendNotFront')
+                return
+            }
             # A payload that is only whitespace can never be verified (it normalizes away),
             # and buttons.json is hand-editable, so this is reachable. Refuse it up front.
             if ([string]::IsNullOrWhiteSpace($textToSend)) {
@@ -3859,7 +3876,12 @@ function Invoke-PillClick($btn) {
             # Shift-click suppresses the send too, leaving the text ready to edit.
             if ($item.submit -and -not $item.chat -and -not $holdShift) {
                 Start-Sleep -Milliseconds 90
-                if (-not (Test-TargetForeground)) { return }
+                if (-not (Test-TargetForeground)) {
+                    # The text IS pasted at this point - only the Enter is withheld.
+                    Write-CkLog 'Submit withheld: foreground moved off Claude after the paste'
+                    Show-SendWarning (L 'sendNotSubmitted')
+                    return
+                }
                 Send-SubmitKey
                 # A payload starting with "/" opens the app's command palette, and the first
                 # Enter is consumed SELECTING the highlighted entry instead of submitting - so

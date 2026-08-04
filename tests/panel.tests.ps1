@@ -1257,6 +1257,17 @@ Check 'a closed pane prunes its mark (index >= pane count)' ($srcText -match '\$
 Check 'the prune skips the zero-pane (modal) case' ($srcText -match '(?s)if \(\$newPanes\.Count -gt 0\) \{\s*foreach \(\$k in @\(\$script:paneMarks\.Keys\)\)')
 Check 'the checkbox icon glyph exists' ($srcText -match "'checkbox'='E739'")
 
+# --- No silent send aborts ---
+# "The button does nothing" was undiagnosable because the foreground checks returned without
+# a word. Every abort in the send path must log a reason and warn at the button; the silent
+# single-line form must never come back.
+Check 'no silent foreground abort remains in the send path' (
+    ([regex]::Matches($srcText, 'Test-TargetForeground\)\) \{ return \}')).Count -eq 0)
+Check 'every foreground abort logs its reason' (
+    ([regex]::Matches($srcText, '(?s)-not \(Test-TargetForeground\)\) \{\s*[^}]{0,400}?Write-CkLog')).Count -ge 3)
+Check 'the focus abort warns at the button' (
+    $srcText -match "(?s)focus never landed in this pane composer'\s*[\r\n]+\s*Show-SendWarning")
+
 # --- -Quit and release-on-gone (the "Claude update says in use" report) ---
 # The panel must be stoppable in one click without hunting anonymous PowerShell rows in Task
 # Manager, and must hold NOTHING of Claude's process (UIA elements, event hooks) while Claude
